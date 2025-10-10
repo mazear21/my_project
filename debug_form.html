@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Student Edit Form Debug</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      .debug-section {
+        border: 1px solid #ccc;
+        margin: 10px 0;
+        padding: 15px;
+        border-radius: 5px;
+      }
+      .success {
+        background: #d4edda;
+        color: #155724;
+      }
+      .error {
+        background: #f8d7da;
+        color: #721c24;
+      }
+      .info {
+        background: #d1ecf1;
+        color: #0c5460;
+      }
+      button {
+        margin: 5px;
+        padding: 10px;
+      }
+      pre {
+        background: #f8f9fa;
+        padding: 10px;
+        border-radius: 3px;
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Student Edit Form Debug Tool</h1>
+
+    <div class="debug-section">
+      <h3>Step 1: Test Database Connection</h3>
+      <button onclick="testDatabase()">Test Database Connection</button>
+      <div id="db-result"></div>
+    </div>
+
+    <div class="debug-section">
+      <h3>Step 2: Test AJAX Endpoint</h3>
+      <button onclick="testAjaxEndpoint()">Test AJAX Get Student 18</button>
+      <div id="ajax-result"></div>
+    </div>
+
+    <div class="debug-section">
+      <h3>Step 3: Create Edit Form</h3>
+      <button onclick="createEditForm()">Create Edit Form</button>
+      <div id="form-container"></div>
+    </div>
+
+    <div class="debug-section">
+      <h3>Step 4: Test Form Population</h3>
+      <button onclick="testFormPopulation()">Test Form Population</button>
+      <div id="population-result"></div>
+    </div>
+
+    <script>
+      function testDatabase() {
+        const resultDiv = document.getElementById('db-result');
+        resultDiv.innerHTML = '<p>Testing database connection...</p>';
+
+        fetch('direct_test.php')
+          .then((response) => response.text())
+          .then((text) => {
+            if (text.includes('Database connected successfully')) {
+              resultDiv.innerHTML = '<div class="success">✓ Database connection successful</div>';
+            } else {
+              resultDiv.innerHTML =
+                '<div class="error">✗ Database connection failed</div><pre>' + text + '</pre>';
+            }
+          })
+          .catch((error) => {
+            resultDiv.innerHTML = '<div class="error">✗ Error: ' + error + '</div>';
+          });
+      }
+
+      function testAjaxEndpoint() {
+        const resultDiv = document.getElementById('ajax-result');
+        resultDiv.innerHTML = '<p>Testing AJAX endpoint...</p>';
+
+        fetch('index.php?ajax=get_student&id=18')
+          .then((response) => response.text())
+          .then((text) => {
+            console.log('AJAX Raw Response:', text);
+            try {
+              const data = JSON.parse(text);
+              resultDiv.innerHTML =
+                '<div class="success">✓ AJAX endpoint working</div><pre>' +
+                JSON.stringify(data, null, 2) +
+                '</pre>';
+            } catch (e) {
+              resultDiv.innerHTML =
+                '<div class="error">✗ JSON Parse Error: ' +
+                e.message +
+                '</div><pre>Raw response: ' +
+                text +
+                '</pre>';
+            }
+          })
+          .catch((error) => {
+            resultDiv.innerHTML = '<div class="error">✗ AJAX Error: ' + error + '</div>';
+          });
+      }
+
+      function createEditForm() {
+        const container = document.getElementById('form-container');
+        container.innerHTML = `
+                <div class="info">Creating edit form...</div>
+                <form id="editForm">
+                    <table border="1" cellpadding="5">
+                        <tr><td>ID:</td><td><input type="text" id="edit_student_id" readonly></td></tr>
+                        <tr><td>Name:</td><td><input type="text" id="edit_name"></td></tr>
+                        <tr><td>Email:</td><td><input type="email" id="edit_email"></td></tr>
+                        <tr><td>Age:</td><td><input type="number" id="edit_age"></td></tr>
+                        <tr><td>Gender:</td><td>
+                            <select id="edit_gender">
+                                <option value="">Select Gender</option>
+                                <option value="Male">Male</option>
+                                <option value="Female">Female</option>
+                            </select>
+                        </td></tr>
+                        <tr><td>Class Level:</td><td><input type="text" id="edit_class_level"></td></tr>
+                        <tr><td>Academic Year:</td><td><input type="text" id="edit_academic_year"></td></tr>
+                        <tr><td>Phone:</td><td><input type="text" id="edit_phone"></td></tr>
+                        <tr><td>Address:</td><td><textarea id="edit_address"></textarea></td></tr>
+                        <tr><td>Graduation:</td><td>
+                            <select id="edit_graduation_status">
+                                <option value="Enrolled">Enrolled</option>
+                                <option value="Graduated">Graduated</option>
+                                <option value="Dropped Out">Dropped Out</option>
+                            </select>
+                        </td></tr>
+                    </table>
+                </form>
+                <div class="success">✓ Form created successfully</div>
+            `;
+      }
+
+      function testFormPopulation() {
+        const resultDiv = document.getElementById('population-result');
+
+        // First check if form exists
+        if (!document.getElementById('edit_name')) {
+          resultDiv.innerHTML =
+            '<div class="error">✗ Form not created yet. Please create form first.</div>';
+          return;
+        }
+
+        resultDiv.innerHTML = '<p>Testing form population...</p>';
+
+        // Get student data and populate form
+        fetch('index.php?ajax=get_student&id=18')
+          .then((response) => response.text())
+          .then((text) => {
+            const data = JSON.parse(text);
+
+            const fieldMappings = {
+              edit_student_id: data.id,
+              edit_name: data.name,
+              edit_email: data.email,
+              edit_age: data.age,
+              edit_gender: data.gender,
+              edit_class_level: data.class_level,
+              edit_academic_year: data.academic_year,
+              edit_phone: data.phone,
+              edit_address: data.address,
+              edit_graduation_status: data.graduation_status,
+            };
+
+            let results = [];
+            for (const [fieldId, value] of Object.entries(fieldMappings)) {
+              const element = document.getElementById(fieldId);
+              if (element) {
+                element.value = value || '';
+                results.push(`✓ ${fieldId}: "${value}" → "${element.value}"`);
+              } else {
+                results.push(`✗ ${fieldId}: Element not found!`);
+              }
+            }
+
+            resultDiv.innerHTML =
+              '<div class="success">Form population test completed:</div><pre>' +
+              results.join('\\n') +
+              '</pre>';
+          })
+          .catch((error) => {
+            resultDiv.innerHTML = '<div class="error">✗ Error: ' + error + '</div>';
+          });
+      }
+    </script>
+  </body>
+</html>
