@@ -586,80 +586,6 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_mark') {
     }
 }
 
-// Handle getting Year 2 subjects for promotion
-if (isset($_POST['action']) && $_POST['action'] === 'get_year2_subjects') {
-    header('Content-Type: application/json');
-    
-    $subjects_query = "SELECT id, subject_name, credits FROM subjects WHERE year = 2 ORDER BY subject_name";
-    $subjects_result = pg_query($conn, $subjects_query);
-    
-    if ($subjects_result) {
-        $subjects = [];
-        while ($subject = pg_fetch_assoc($subjects_result)) {
-            $subjects[] = $subject;
-        }
-        echo json_encode($subjects);
-    } else {
-        echo json_encode(['error' => 'Error loading subjects: ' . pg_last_error($conn)]);
-    }
-    
-    exit;
-}
-
-// Handle student promotion with subject selection
-if (isset($_POST['action']) && $_POST['action'] === 'promote_student_with_subjects') {
-    $student_id = (int)$_POST['student_id'];
-    $selected_subjects = json_decode($_POST['selected_subjects'], true);
-    
-    if ($student_id > 0 && is_array($selected_subjects)) {
-        // Get student details
-        $student_query = "SELECT * FROM students WHERE id = $1 AND year = 1 AND status = 'active'";
-        $student_result = pg_query_params($conn, $student_query, array($student_id));
-        
-        if ($student_result && pg_num_rows($student_result) > 0) {
-            $student = pg_fetch_assoc($student_result);
-            
-            // Begin transaction
-            pg_query($conn, "BEGIN");
-            
-            try {
-                // Update student to Year 2
-                $update_query = "UPDATE students SET year = 2 WHERE id = $1";
-                $update_result = pg_query_params($conn, $update_query, array($student_id));
-                
-                if (!$update_result) {
-                    throw new Exception("Error updating student year");
-                }
-                
-                // Create marks entries for selected Year 2 subjects
-                foreach ($selected_subjects as $subject_id) {
-                    $mark_query = "INSERT INTO marks (student_id, subject_id) VALUES ($1, $2)";
-                    $mark_result = pg_query_params($conn, $mark_query, array($student_id, $subject_id));
-                    
-                    if (!$mark_result) {
-                        throw new Exception("Error creating mark entry for subject ID: $subject_id");
-                    }
-                }
-                
-                // Commit transaction
-                pg_query($conn, "COMMIT");
-                
-                header("Location: ?page=students&success=" . urlencode("Student promoted successfully and enrolled in Year 2 subjects!"));
-                exit;
-                
-            } catch (Exception $e) {
-                // Rollback on error
-                pg_query($conn, "ROLLBACK");
-                $error_message = "Error promoting student: " . $e->getMessage();
-            }
-        } else {
-            $error_message = "Student not found or not eligible for promotion (must be active Year 1 student).";
-        }
-    } else {
-        $error_message = "Invalid student ID or subject selection.";
-    }
-}
-
 // Handle student promotion (Year 1 to Year 2)
 if (isset($_POST['action']) && $_POST['action'] === 'promote_student') {
     $student_id = (int)$_POST['student_id'];
@@ -706,39 +632,23 @@ if (isset($_POST['action']) && $_POST['action'] === 'graduate_student') {
         if ($student_result && pg_num_rows($student_result) > 0) {
             $student = pg_fetch_assoc($student_result);
             
-            // Calculate graduation grade and check eligibility
-            $graduation_data = calculateGraduationGrade($conn, $student_id);
+            // Insert into graduated_students table
+            $graduate_query = "INSERT INTO graduated_students (student_id, student_name, age, gender, class_level, email, phone, graduation_date, final_year) 
+                              VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, 2)";
+            $graduate_result = pg_query_params($conn, $graduate_query, array(
+                $student['id'], $student['name'], $student['age'], $student['gender'], 
+                $student['class_level'], $student['email'], $student['phone']
+            ));
             
-            // Validate graduation eligibility
-            if ($graduation_data['graduation_status'] !== 'graduated') {
-                $status_messages = [
-                    'incomplete' => "Student cannot graduate: Missing grades for both Year 1 and Year 2",
-                    'year1_complete' => "Student cannot graduate: Year 2 subjects not completed ({$graduation_data['year2_subjects_completed']}/{$graduation_data['year2_subjects_total']} completed)",
-                    'year2_complete' => "Student cannot graduate: Year 1 subjects not completed ({$graduation_data['year1_subjects_completed']}/{$graduation_data['year1_subjects_total']} completed)",
-                    'failed' => "Student cannot graduate: Total grade {$graduation_data['graduation_grade']}/100 is below 50% requirement"
-                ];
-                $error_message = $status_messages[$graduation_data['graduation_status']] ?? "Student is not eligible for graduation";
+            if ($graduate_result) {
+                // Update student status to graduated
+                $update_query = "UPDATE students SET status = 'graduated' WHERE id = $1";
+                pg_query_params($conn, $update_query, array($student_id));
+                
+                header("Location: ?page=students&success=" . urlencode("Student graduated successfully!"));
+                exit;
             } else {
-                $graduation_grade = $graduation_data['graduation_grade'];
-                
-                // Insert into graduated_students table with graduation grade
-                $graduate_query = "INSERT INTO graduated_students (student_id, student_name, age, gender, class_level, email, phone, graduation_date, final_year, graduation_grade) 
-                                  VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, 2, $8)";
-                $graduate_result = pg_query_params($conn, $graduate_query, array(
-                    $student['id'], $student['name'], $student['age'], $student['gender'], 
-                    $student['class_level'], $student['email'], $student['phone'], $graduation_grade
-                ));
-                
-                if ($graduate_result) {
-                    // Update student status to graduated
-                    $update_query = "UPDATE students SET status = 'graduated' WHERE id = $1";
-                    pg_query_params($conn, $update_query, array($student_id));
-                    
-                    header("Location: ?page=students&success=" . urlencode("Student graduated successfully! Final Grade: {$graduation_grade}/100 ({$graduation_data['graduation_percentage']}%)"));
-                    exit;
-                } else {
-                    $error_message = "Error graduating student: " . pg_last_error($conn);
-                }
+                $error_message = "Error graduating student: " . pg_last_error($conn);
             }
         } else {
             $error_message = "Student not found or not eligible for graduation (must be active Year 2 student).";
@@ -991,7 +901,21 @@ if (isset($_POST['action']) && $_POST['action'] === 'get_students') {
     exit;
 }
 
-
+// Handle graduation grade calculation
+if (isset($_POST['action']) && $_POST['action'] === 'calculate_graduation_grade') {
+    header('Content-Type: application/json');
+    
+    $student_id = $_POST['student_id'] ?? null;
+    
+    if ($student_id) {
+        $result = calculateGraduationGrade($conn, $student_id);
+        echo json_encode($result);
+    } else {
+        echo json_encode(['error' => 'Student ID is required']);
+    }
+    
+    exit;
+}
 
 // Function to resequence table IDs
 function resequenceTable($conn, $table_name) {
@@ -1671,11 +1595,7 @@ function calculateGraduationGrade($conn, $student_id) {
     ];
 }
 
-// Only generate chart data if we're on the reports page (dashboard)
-$chartData = null;
-if ($page == 'reports') {
-    $chartData = generateChartData($conn);
-}
+$chartData = generateChartData($conn);
 ?>
 <!DOCTYPE html>
 <html lang="en" dir="ltr" id="htmlRoot">
@@ -2724,7 +2644,7 @@ if ($page == 'reports') {
                         <div class="kpi-grid">
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="100">
                                 <div class="kpi-content">
-                                    <div class="kpi-value" data-target="<?= $chartData['kpis']['year1_students'] ?? 0 ?>"><?= $chartData['kpis']['year1_students'] ?? 0 ?></div>
+                                    <div class="kpi-value" data-target="<?= $chartData['kpis']['year1_students'] ?>"><?= $chartData['kpis']['year1_students'] ?></div>
                                     <div class="kpi-label" data-translate="year_1_students">Year 1 Students</div>
                                     <div class="kpi-trend positive" data-translate="active_students">Active students</div>
                                 </div>
@@ -2732,7 +2652,7 @@ if ($page == 'reports') {
                             
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="150">
                                 <div class="kpi-content">
-                                    <div class="kpi-value" data-target="<?= $chartData['kpis']['year2_students'] ?? 0 ?>"><?= $chartData['kpis']['year2_students'] ?? 0 ?></div>
+                                    <div class="kpi-value" data-target="<?= $chartData['kpis']['year2_students'] ?>"><?= $chartData['kpis']['year2_students'] ?></div>
                                     <div class="kpi-label" data-translate="year_2_students">Year 2 Students</div>
                                     <div class="kpi-trend positive" data-translate="active_students">Active students</div>
                                 </div>
@@ -2740,7 +2660,7 @@ if ($page == 'reports') {
                             
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="200">
                                 <div class="kpi-content">
-                                    <div class="kpi-value"><?= $chartData['kpis']['avg_score'] ?? 0 ?>%</div>
+                                    <div class="kpi-value"><?= $chartData['kpis']['avg_score'] ?>%</div>
                                     <div class="kpi-label" data-translate="average_score">Average Score</div>
                                     <div class="kpi-trend positive" data-translate="overall_performance">Overall performance</div>
                                 </div>
@@ -2748,15 +2668,15 @@ if ($page == 'reports') {
                             
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="250">
                                 <div class="kpi-content">
-                                    <div class="kpi-value"><?= $chartData['kpis']['top_class_display'] ?? 'N/A' ?></div>
+                                    <div class="kpi-value"><?= $chartData['kpis']['top_class_display'] ?></div>
                                     <div class="kpi-label" data-translate="top_class_performance">Top Class Performance</div>
-                                    <div class="kpi-trend positive"><?= $chartData['kpis']['top_class_score'] ?? 0 ?>% score</div>
+                                    <div class="kpi-trend positive"><?= $chartData['kpis']['top_class_score'] ?>% score</div>
                                 </div>
                             </div>
                             
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="300">
                                 <div class="kpi-content">
-                                    <div class="kpi-value"><?= $chartData['kpis']['pass_rate'] ?? 0 ?>%</div>
+                                    <div class="kpi-value"><?= $chartData['kpis']['pass_rate'] ?>%</div>
                                     <div class="kpi-label" data-translate="pass_rate">Pass Rate</div>
                                     <div class="kpi-trend positive" data-translate="passing_students">Passing students</div>
                                 </div>
@@ -2764,15 +2684,15 @@ if ($page == 'reports') {
                             
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="350">
                                 <div class="kpi-content">
-                                    <div class="kpi-value" style="font-size: 1.4rem; line-height: 1.2; overflow-wrap: break-word; word-wrap: break-word; hyphens: auto;"><?= htmlspecialchars($chartData['kpis']['risk_subject'] ?? 'N/A') ?></div>
+                                    <div class="kpi-value" style="font-size: 1.4rem; line-height: 1.2; overflow-wrap: break-word; word-wrap: break-word; hyphens: auto;"><?= htmlspecialchars($chartData['kpis']['risk_subject']) ?></div>
                                     <div class="kpi-label" data-translate="risk_subject">Risk Subject</div>
-                                    <div class="kpi-trend negative"><?= $chartData['kpis']['risk_failure_rate'] ?? 0 ?>% fail rate</div>
+                                    <div class="kpi-trend negative"><?= $chartData['kpis']['risk_failure_rate'] ?>% fail rate</div>
                                 </div>
                             </div>
                             
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="400">
                                 <div class="kpi-content">
-                                    <div class="kpi-value"><?= $chartData['kpis']['enrolled_students'] ?? 0 ?></div>
+                                    <div class="kpi-value"><?= $chartData['kpis']['enrolled_students'] ?></div>
                                     <div class="kpi-label" data-translate="enrolled_students">Enrolled Students</div>
                                     <div class="kpi-trend positive" data-translate="with_marks">With marks recorded</div>
                                 </div>
@@ -2780,9 +2700,9 @@ if ($page == 'reports') {
                             
                             <div class="kpi-card" data-aos="fade-up" data-aos-delay="450">
                                 <div class="kpi-content">
-                                    <div class="kpi-value"><?= $chartData['kpis']['excellence_rate'] ?? 0 ?>%</div>
+                                    <div class="kpi-value"><?= $chartData['kpis']['excellence_rate'] ?>%</div>
                                     <div class="kpi-label" data-translate="excellence_rate">Excellence Rate</div>
-                                    <div class="kpi-trend <?= ($chartData['kpis']['excellence_rate'] ?? 0) >= 15 ? 'positive' : 'negative' ?>" data-translate="a_plus_students">A+ students (90+)</div>
+                                    <div class="kpi-trend <?= $chartData['kpis']['excellence_rate'] >= 15 ? 'positive' : 'negative' ?>" data-translate="a_plus_students">A+ students (90+)</div>
                                 </div>
                             </div>
                         </div>
@@ -3361,10 +3281,8 @@ if ($page == 'reports') {
                                                 m.id as mark_id,
                                                 s.id as student_id,
                                                 s.name as student_name,
-                                                s.year as student_year,
                                                 s.class_level,
                                                 sub.subject_name,
-                                                sub.year as subject_year,
                                                 sub.credits,
                                                 m.final_exam as final_mark,
                                                 m.midterm_exam as midterm_mark,
@@ -3388,44 +3306,15 @@ if ($page == 'reports') {
                                         ";
                                         $reports_result = pg_query($conn, $reports_query);
                                         
-                                        // Pre-calculate graduation grades for reports (optimized approach)
-                                        $reports_graduation_grades = array();
-                                        if ($reports_result && pg_num_rows($reports_result) > 0) {
-                                            // First pass: collect all unique student IDs
-                                            $all_reports = array();
-                                            $unique_students = array();
-                                            
-                                            while($temp_report = pg_fetch_assoc($reports_result)) {
-                                                $all_reports[] = $temp_report;
-                                                if (!in_array($temp_report['student_id'], $unique_students)) {
-                                                    $unique_students[] = $temp_report['student_id'];
-                                                }
-                                            }
-                                            
-                                            // Calculate year-specific grades for unique students
-                                            foreach($unique_students as $student_id) {
-                                                $graduation_result = calculateGraduationGrade($conn, $student_id);
-                                                $reports_graduation_grades[$student_id] = array(
-                                                    'year1_grade' => $graduation_result['success'] ? $graduation_result['year1_grade'] : 0,
-                                                    'year2_grade' => $graduation_result['success'] ? $graduation_result['year2_grade'] : 0,
-                                                    'total_grade' => $graduation_result['success'] ? ($graduation_result['year1_grade'] + $graduation_result['year2_grade']) : 0
-                                                );
-                                            }
-                                        }
-                                        
-                                        if (!empty($all_reports)):
-                                            foreach($all_reports as $report):
+                                        if ($reports_result && pg_num_rows($reports_result) > 0):
+                                            while($report = pg_fetch_assoc($reports_result)):
                                                 $grade_class = 'grade-' . strtolower(str_replace('+', '-plus', $report['grade']));
                                                 
-                                                // Get pre-calculated year-specific grade for this student
-                                                $year_grades = $reports_graduation_grades[$report['student_id']] ?? array('year1_grade' => 0, 'year2_grade' => 0);
-                                                
-                                                // Show grade based on the SUBJECT's year, not student's current year
-                                                $display_grade = 0;
-                                                if ($report['subject_year'] == 1) {
-                                                    $display_grade = $year_grades['year1_grade'];
-                                                } elseif ($report['subject_year'] == 2) {
-                                                    $display_grade = $year_grades['year2_grade'];
+                                                // Calculate graduation grade for this student
+                                                $graduation_result = calculateGraduationGrade($conn, $report['student_id']);
+                                                $graduation_grade = 0;
+                                                if ($graduation_result['success']) {
+                                                    $graduation_grade = $graduation_result['year1_grade'] + $graduation_result['year2_grade'];
                                                 }
                                         ?>
                                         <tr>
@@ -3437,11 +3326,11 @@ if ($page == 'reports') {
                                             <td><?= intval($report['quizzes_mark']) ?></td>
                                             <td><?= intval($report['daily_mark']) ?></td>
                                             <td><strong><?= intval($report['total_mark']) ?></strong></td>
-                                            <td><strong style="color: #3498db;"><?= number_format($display_grade, 2) ?></strong></td>
+                                            <td><strong style="color: #3498db;"><?= number_format($graduation_grade, 2) ?></strong></td>
                                             <td><span class="grade-badge <?= $grade_class ?>"><?= $report['grade'] ?></span></td>
                                         </tr>
                                         <?php 
-                                            endforeach;
+                                            endwhile;
                                         else:
                                         ?>
                                         <tr>
@@ -3648,7 +3537,6 @@ if ($page == 'reports') {
                                         <th data-translate="gender">Gender</th>
                                         <th data-translate="class">Class</th>
                                         <th data-translate="academic_year">Year</th>
-                                        <th>Status</th>
                                         <th data-translate="email">Email</th>
                                         <th data-translate="phone">Phone</th>
                                         <th data-translate="subjects">Subjects</th>
@@ -3696,24 +3584,6 @@ if ($page == 'reports') {
                                                 Year <?= $student['year'] ?? 'N/A' ?>
                                             </span>
                                         </td>
-                                        <td>
-                                            <?php if ($student['year'] == 1): ?>
-                                                <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;
-                                                             background: #E0F2FE; color: #0284C7;">
-                                                    📚 Year 1 Student
-                                                </span>
-                                            <?php elseif ($student['year'] == 2): ?>
-                                                <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;
-                                                             background: #FEF3C7; color: #D97706;">
-                                                    🎓 Year 2 Student
-                                                </span>
-                                            <?php else: ?>
-                                                <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;
-                                                             background: #F3F4F6; color: #6B7280;">
-                                                    ❓ Unknown
-                                                </span>
-                                            <?php endif; ?>
-                                        </td>
                                         <td><?= htmlspecialchars($student['email'] ?? '') ?></td>
                                         <td><?= htmlspecialchars($student['phone'] ?? '') ?></td>
                                         <td>
@@ -3744,7 +3614,7 @@ if ($page == 'reports') {
                                     else:
                                     ?>
                                     <tr>
-                                        <td colspan="11" style="text-align: center; color: var(--text-light); padding: 2rem;">
+                                        <td colspan="10" style="text-align: center; color: var(--text-light); padding: 2rem;">
                                             No students found. Add some students to get started.
                                         </td>
                                     </tr>
@@ -3764,6 +3634,44 @@ if ($page == 'reports') {
                     <p class="dashboard-subtitle" data-translate="manage_graduated_students">View all graduated students</p>
                 </div>
                 <div class="reports-main-content">
+                    <!-- Graduation Grade Calculator -->
+                    <div class="data-table-section" data-aos="fade-up" style="margin-bottom: 2rem;">
+                        <div class="section-header">
+                            <h3 class="section-title">🎯 Graduation Grade Calculator</h3>
+                            <p style="color: var(--text-light); margin: 0.5rem 0;">Calculate final graduation grade: Year 1 (max 50) + Year 2 (max 50) = Total (max 100)</p>
+                        </div>
+                        
+                        <div style="background: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem;">
+                            <div style="display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: end;">
+                                <div>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500;">Select Student:</label>
+                                    <select id="graduationStudentSelect" style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 4px;">
+                                        <option value="">-- Select a Student --</option>
+                                        <?php
+                                        // Get all students for graduation calculation
+                                        $students_query = "SELECT id, name, year FROM students WHERE status = 'active' ORDER BY name";
+                                        $students_result = pg_query($conn, $students_query);
+                                        if ($students_result && pg_num_rows($students_result) > 0):
+                                            while($student = pg_fetch_assoc($students_result)):
+                                        ?>
+                                            <option value="<?= $student['id'] ?>"><?= htmlspecialchars($student['name']) ?> (Year <?= $student['year'] ?>)</option>
+                                        <?php 
+                                            endwhile;
+                                        endif;
+                                        ?>
+                                    </select>
+                                </div>
+                                <button onclick="calculateGraduationGrade()" style="padding: 0.75rem 1.5rem; background: var(--primary-color); color: white; border: none; border-radius: 4px; font-weight: 500; cursor: pointer;">
+                                    Calculate Graduation Grade
+                                </button>
+                            </div>
+                            
+                            <div id="graduationResults" style="display: none; margin-top: 1.5rem; padding: 1rem; background: #f8f9fa; border-radius: 6px;">
+                                <!-- Results will be populated here -->
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Graduated Students List -->
                     <div class="data-table-section" data-aos="fade-up">
                         <div class="section-header">
@@ -3789,7 +3697,6 @@ if ($page == 'reports') {
                                         <th data-translate="age">Age</th>
                                         <th data-translate="gender">Gender</th>
                                         <th data-translate="class">Class</th>
-                                        <th>Graduation Grade</th>
                                         <th data-translate="email">Email</th>
                                         <th data-translate="phone">Phone</th>
                                         <th data-translate="graduation_date">Graduation Date</th>
@@ -3824,13 +3731,6 @@ if ($page == 'reports') {
                                                 Class <?= htmlspecialchars($graduate['class_level']) ?>
                                             </span>
                                         </td>
-                                        <td>
-                                            <span style="padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; font-weight: 700;
-                                                         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                                                         color: white; text-align: center; min-width: 60px; display: inline-block;">
-                                                <?= $graduate['graduation_grade'] ? number_format($graduate['graduation_grade'], 1) . '/100' : 'N/A' ?>
-                                            </span>
-                                        </td>
                                         <td><?= htmlspecialchars($graduate['email'] ?? '') ?></td>
                                         <td><?= htmlspecialchars($graduate['phone'] ?? '') ?></td>
                                         <td>
@@ -3849,7 +3749,7 @@ if ($page == 'reports') {
                                     else:
                                     ?>
                                     <tr>
-                                        <td colspan="11" style="text-align: center; color: var(--text-light); padding: 2rem;">
+                                        <td colspan="10" style="text-align: center; color: var(--text-light); padding: 2rem;">
                                             No graduated students yet. Students will appear here after graduation.
                                         </td>
                                     </tr>
@@ -4148,27 +4048,6 @@ if ($page == 'reports') {
                                 </thead>
                                 <tbody>
                                     <?php
-                                    // First, get all unique student IDs and pre-calculate their year-specific grades
-                                    $student_year_grades = array();
-                                    
-                                    $students_query = "SELECT DISTINCT student_id FROM marks";
-                                    $students_result = pg_query($conn, $students_query);
-                                    
-                                    if ($students_result) {
-                                        while($student_row = pg_fetch_assoc($students_result)) {
-                                            $student_id = $student_row['student_id'];
-                                            $graduation_result = calculateGraduationGrade($conn, $student_id);
-                                            
-                                            // Store both year grades separately
-                                            $student_year_grades[$student_id] = array(
-                                                'year1_grade' => $graduation_result['success'] ? $graduation_result['year1_grade'] : 0,
-                                                'year2_grade' => $graduation_result['success'] ? $graduation_result['year2_grade'] : 0,
-                                                'total_grade' => $graduation_result['success'] ? ($graduation_result['year1_grade'] + $graduation_result['year2_grade']) : 0
-                                            );
-                                        }
-                                    }
-                                    
-                                    // Now get marks data
                                     $marks_query = "
                                         SELECT 
                                             m.*,
@@ -4196,15 +4075,11 @@ if ($page == 'reports') {
                                         while($mark = pg_fetch_assoc($marks_result)):
                                             $grade_class = 'grade-' . strtolower(str_replace('+', '-plus', $mark['grade']));
                                             
-                                            // Get pre-calculated year-specific grade for this student
-                                            $year_grades = $student_year_grades[$mark['student_id']] ?? array('year1_grade' => 0, 'year2_grade' => 0);
-                                            
-                                            // Show grade based on the SUBJECT's year, not student's current year
-                                            $display_grade = 0;
-                                            if ($mark['subject_year'] == 1) {
-                                                $display_grade = $year_grades['year1_grade'];
-                                            } elseif ($mark['subject_year'] == 2) {
-                                                $display_grade = $year_grades['year2_grade'];
+                                            // Calculate graduation grade for this student
+                                            $graduation_result = calculateGraduationGrade($conn, $mark['student_id']);
+                                            $graduation_grade = 0;
+                                            if ($graduation_result['success']) {
+                                                $graduation_grade = $graduation_result['year1_grade'] + $graduation_result['year2_grade'];
                                             }
                                     ?>
                                     <tr data-year="<?= $mark['student_year'] ?>" data-student-status="<?= $mark['student_status'] ?>" data-class="<?= $mark['student_class'] ?>">
@@ -4238,7 +4113,7 @@ if ($page == 'reports') {
                                         <td style="text-align: center;"><?= (int)$mark['quizzes'] ?></td>
                                         <td style="text-align: center;"><?= (int)$mark['daily_activities'] ?></td>
                                         <td style="text-align: center;"><strong><?= (int)$mark['mark'] ?></strong></td>
-                                        <td style="text-align: center;"><strong style="color: #3498db;"><?= number_format($display_grade, 2) ?></strong></td>
+                                        <td style="text-align: center;"><strong style="color: #3498db;"><?= number_format($graduation_grade, 2) ?></strong></td>
                                         <td style="text-align: center;"><span class="grade-badge <?= $grade_class ?>"><?= $mark['grade'] ?></span></td>
                                         <td style="text-align: center;">
                                             <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
@@ -4946,9 +4821,9 @@ if ($page == 'reports') {
             if (!distributionCtx) return;
             
             // Get student distribution data
-            const distributionLabels = <?= json_encode($chartData['student_distribution']['labels'] ?? []) ?>;
-            const distributionData = <?= json_encode($chartData['student_distribution']['data'] ?? []) ?>;
-            const distributionColors = <?= json_encode($chartData['student_distribution']['colors'] ?? []) ?>;
+            const distributionLabels = <?= json_encode($chartData['student_distribution']['labels']) ?>;
+            const distributionData = <?= json_encode($chartData['student_distribution']['data']) ?>;
+            const distributionColors = <?= json_encode($chartData['student_distribution']['colors']) ?>;
             
             window.studentDistributionChart = new Chart(distributionCtx, {
                 type: 'pie',
@@ -7799,17 +7674,13 @@ if ($page == 'reports') {
         }
 
         function handleStudentAction(action, studentId) {
-            if (action === 'promote_student') {
-                showPromotionDialog(studentId);
-                return;
-            }
-            
             const formData = new FormData();
             formData.append('action', action);
             formData.append('student_id', studentId);
             
             let confirmMessage = '';
             if (action === 'delete_student') confirmMessage = 'Are you sure you want to delete this student?';
+            else if (action === 'promote_student') confirmMessage = 'Are you sure you want to promote this student to Year 2?';
             else if (action === 'graduate_student') confirmMessage = 'Are you sure you want to graduate this student?';
             
             if (confirmMessage && !confirm(confirmMessage)) {
@@ -7845,137 +7716,6 @@ if ($page == 'reports') {
             })
             .catch(error => {
                 console.error('Error:', error);
-                showErrorMessage('Network error. Please try again.');
-            });
-        }
-
-        function showPromotionDialog(studentId) {
-            // First, get available Year 2 subjects
-            fetch('', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `action=get_year2_subjects`
-            })
-            .then(response => response.json())
-            .then(subjects => {
-                if (subjects.error) {
-                    showErrorMessage(subjects.error);
-                    return;
-                }
-                
-                const modal = document.createElement('div');
-                modal.style.cssText = `
-                    position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
-                    background: rgba(0,0,0,0.7); z-index: 10000; display: flex; 
-                    align-items: center; justify-content: center; padding: 20px;
-                `;
-                
-                let subjectsHtml = subjects.map(subject => `
-                    <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; background: #F9FAFB; border-radius: 4px; margin-bottom: 0.5rem;">
-                        <input type="checkbox" id="subject_${subject.id}" value="${subject.id}" checked style="margin: 0;">
-                        <label for="subject_${subject.id}" style="margin: 0; flex: 1; cursor: pointer;">
-                            <strong>${subject.subject_name}</strong> (${subject.credits} credits)
-                        </label>
-                    </div>
-                `).join('');
-                
-                modal.innerHTML = `
-                    <div style="background: white; border-radius: 12px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; position: relative;">
-                        <div style="padding: 1.5rem; border-bottom: 1px solid #E5E7EB; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 12px 12px 0 0;">
-                            <h3 style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                                📈 Promote to Year 2
-                            </h3>
-                            <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 0.9rem;">Select Year 2 subjects for this student</p>
-                            <button onclick="this.closest('.promotion-modal').remove()" 
-                                    style="position: absolute; top: 1rem; right: 1rem; background: none; border: none; font-size: 1.5rem; cursor: pointer; color: white; opacity: 0.8;">
-                                ×
-                            </button>
-                        </div>
-                        <div style="padding: 1.5rem;">
-                            <div style="background: #F0FDF4; padding: 1rem; border-radius: 6px; border-left: 4px solid #059669; margin-bottom: 1.5rem;">
-                                <h4 style="margin: 0 0 0.5rem 0; color: #059669;">🎯 Promotion Process</h4>
-                                <p style="margin: 0; font-size: 0.9rem; color: #065F46;">
-                                    The student's Year 1 grades will be preserved. Select which Year 2 subjects they should be enrolled in.
-                                </p>
-                            </div>
-                            
-                            <h4 style="margin: 0 0 1rem 0; color: #374151;">Available Year 2 Subjects:</h4>
-                            <div id="subjectsList" style="max-height: 300px; overflow-y: auto;">
-                                ${subjectsHtml}
-                            </div>
-                            
-                            <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #E5E7EB;">
-                                <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                                    <button onclick="this.closest('.promotion-modal').remove()" 
-                                            style="background: #6B7280; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 6px; cursor: pointer;">
-                                        Cancel
-                                    </button>
-                                    <button onclick="executePromotion(${studentId})" 
-                                            style="background: #10B981; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 6px; cursor: pointer; font-weight: 600;">
-                                        📈 Promote Student
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                
-                modal.className = 'promotion-modal';
-                document.body.appendChild(modal);
-                
-                // Close on backdrop click
-                modal.addEventListener('click', (e) => {
-                    if (e.target === modal) modal.remove();
-                });
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                showErrorMessage('Error loading subjects. Please try again.');
-            });
-        }
-
-        function executePromotion(studentId) {
-            const modal = document.querySelector('.promotion-modal');
-            const selectedSubjects = [];
-            
-            // Get selected subjects
-            const checkboxes = modal.querySelectorAll('input[type="checkbox"]:checked');
-            checkboxes.forEach(checkbox => {
-                selectedSubjects.push(checkbox.value);
-            });
-            
-            if (selectedSubjects.length === 0) {
-                showErrorMessage('Please select at least one Year 2 subject.');
-                return;
-            }
-            
-            // Execute promotion with selected subjects
-            const formData = new FormData();
-            formData.append('action', 'promote_student_with_subjects');
-            formData.append('student_id', studentId);
-            formData.append('selected_subjects', JSON.stringify(selectedSubjects));
-            
-            fetch('', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.text())
-            .then(data => {
-                modal.remove();
-                
-                if (data.includes('successfully')) {
-                    showSuccessMessage('Student promoted to Year 2 successfully!');
-                    // Refresh the page to show updated student data
-                    setTimeout(() => window.location.reload(), 1500);
-                } else {
-                    showErrorMessage('Error promoting student. Please try again.');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                modal.remove();
                 showErrorMessage('Network error. Please try again.');
             });
         }
@@ -8348,7 +8088,124 @@ if ($page == 'reports') {
             });
         }
 
-
+        // Graduation Grade Calculator
+        async function calculateGraduationGrade() {
+            const studentId = document.getElementById('graduationStudentSelect').value;
+            
+            if (!studentId) {
+                alert('Please select a student');
+                return;
+            }
+            
+            const resultsDiv = document.getElementById('graduationResults');
+            resultsDiv.style.display = 'block';
+            resultsDiv.innerHTML = '<div style="text-align: center; padding: 1rem; color: #666;"><i class="fas fa-spinner fa-spin"></i> Calculating graduation grade...</div>';
+            
+            try {
+                const response = await fetch('', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `action=calculate_graduation_grade&student_id=${studentId}`
+                });
+                
+                const result = await response.json();
+                
+                if (result.error) {
+                    resultsDiv.innerHTML = `<div style="color: #dc3545; font-weight: 500;"><i class="fas fa-exclamation-triangle"></i> Error: ${result.error}</div>`;
+                    return;
+                }
+                
+                displayGraduationResults(result);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                resultsDiv.innerHTML = '<div style="color: #dc3545; font-weight: 500;"><i class="fas fa-exclamation-triangle"></i> Network error occurred</div>';
+            }
+        }
+        
+        function displayGraduationResults(result) {
+            const resultsDiv = document.getElementById('graduationResults');
+            
+            let statusColor = '#6c757d';
+            let statusIcon = '⏳';
+            let statusText = 'Incomplete';
+            
+            switch(result.graduation_status) {
+                case 'graduated':
+                    statusColor = '#28a745';
+                    statusIcon = '🎓';
+                    statusText = 'Graduated';
+                    break;
+                case 'failed':
+                    statusColor = '#dc3545';
+                    statusIcon = '❌';
+                    statusText = 'Failed';
+                    break;
+                case 'year1_complete':
+                    statusColor = '#ffc107';
+                    statusIcon = '📚';
+                    statusText = 'Year 1 Complete';
+                    break;
+                case 'year2_complete':
+                    statusColor = '#17a2b8';
+                    statusIcon = '📖';
+                    statusText = 'Year 2 Complete';
+                    break;
+            }
+            
+            resultsDiv.innerHTML = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1rem;">
+                    <div style="background: white; padding: 1rem; border-radius: 6px; text-align: center; border-left: 4px solid #3498db;">
+                        <h4 style="margin: 0 0 0.5rem 0; color: #3498db;">Year 1</h4>
+                        <div style="font-size: 1.5rem; font-weight: bold; color: ${result.year1_complete ? '#28a745' : '#6c757d'};">
+                            ${result.year1_grade}/${result.year1_max}
+                        </div>
+                        <div style="font-size: 0.9rem; color: #666; margin-top: 0.25rem;">
+                            ${result.year1_subjects_completed}/${result.year1_subjects_total} subjects
+                        </div>
+                        <div style="font-size: 0.8rem; color: ${result.year1_complete ? '#28a745' : '#dc3545'}; margin-top: 0.25rem;">
+                            ${result.year1_complete ? '✅ Complete' : '⚠️ Incomplete'}
+                        </div>
+                    </div>
+                    
+                    <div style="background: white; padding: 1rem; border-radius: 6px; text-align: center; border-left: 4px solid #e74c3c;">
+                        <h4 style="margin: 0 0 0.5rem 0; color: #e74c3c;">Year 2</h4>
+                        <div style="font-size: 1.5rem; font-weight: bold; color: ${result.year2_complete ? '#28a745' : '#6c757d'};">
+                            ${result.year2_grade}/${result.year2_max}
+                        </div>
+                        <div style="font-size: 0.9rem; color: #666; margin-top: 0.25rem;">
+                            ${result.year2_subjects_completed}/${result.year2_subjects_total} subjects
+                        </div>
+                        <div style="font-size: 0.8rem; color: ${result.year2_complete ? '#28a745' : '#dc3545'}; margin-top: 0.25rem;">
+                            ${result.year2_complete ? '✅ Complete' : '⚠️ Incomplete'}
+                        </div>
+                    </div>
+                    
+                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 1rem; border-radius: 6px; text-align: center;">
+                        <h4 style="margin: 0 0 0.5rem 0;">Graduation Grade</h4>
+                        <div style="font-size: 2rem; font-weight: bold;">
+                            ${result.graduation_grade}/${result.graduation_max}
+                        </div>
+                        <div style="font-size: 0.9rem; opacity: 0.9; margin-top: 0.25rem;">
+                            ${result.graduation_percentage.toFixed(1)}%
+                        </div>
+                        <div style="font-size: 0.9rem; margin-top: 0.5rem;">
+                            <span style="color: ${statusColor};">${statusIcon} ${statusText}</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="background: #f8f9fa; padding: 1rem; border-radius: 6px; border-left: 4px solid #17a2b8;">
+                    <h5 style="margin: 0 0 0.5rem 0; color: #17a2b8;"><i class="fas fa-calculator"></i> Calculation Formula:</h5>
+                    <p style="margin: 0; font-family: monospace; background: white; padding: 0.5rem; border-radius: 4px;">
+                        Final Grade = Year 1 Grade + Year 2 Grade<br>
+                        ${result.year1_grade} + ${result.year2_grade} = ${result.graduation_grade} out of 100
+                    </p>
+                </div>
+            `;
+        }
     </script>
     
     <style>

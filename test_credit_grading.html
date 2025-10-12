@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Credit-Based Grading System Test</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: #f5f5f5;
+      }
+
+      .container {
+        background: white;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        margin-bottom: 20px;
+      }
+
+      h1 {
+        color: #2c3e50;
+        border-bottom: 2px solid #3498db;
+        padding-bottom: 10px;
+      }
+
+      .form-group {
+        margin-bottom: 15px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+        color: #34495e;
+      }
+
+      select,
+      input,
+      button {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+      }
+
+      button {
+        background-color: #3498db;
+        color: white;
+        border: none;
+        cursor: pointer;
+        font-weight: bold;
+        transition: background-color 0.3s;
+      }
+
+      button:hover {
+        background-color: #2980b9;
+      }
+
+      .results {
+        margin-top: 20px;
+        padding: 20px;
+        background-color: #ecf0f1;
+        border-radius: 8px;
+        display: none;
+      }
+
+      .grade-breakdown {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 15px;
+        margin-top: 15px;
+      }
+
+      .subject-card {
+        background: white;
+        padding: 15px;
+        border-radius: 6px;
+        border-left: 4px solid #3498db;
+      }
+
+      .subject-name {
+        font-weight: bold;
+        color: #2c3e50;
+        margin-bottom: 8px;
+      }
+
+      .subject-details {
+        font-size: 14px;
+        color: #7f8c8d;
+      }
+
+      .final-grade {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 20px;
+        border-radius: 8px;
+        text-align: center;
+        margin-top: 20px;
+      }
+
+      .final-grade h3 {
+        margin: 0;
+        font-size: 24px;
+      }
+
+      .final-grade p {
+        margin: 5px 0;
+        opacity: 0.9;
+      }
+
+      .error {
+        background-color: #e74c3c;
+        color: white;
+        padding: 15px;
+        border-radius: 6px;
+        margin-top: 15px;
+      }
+
+      .success {
+        background-color: #27ae60;
+        color: white;
+        padding: 15px;
+        border-radius: 6px;
+        margin-top: 15px;
+      }
+
+      .loading {
+        text-align: center;
+        padding: 20px;
+        color: #7f8c8d;
+      }
+
+      .status-badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: bold;
+        margin-left: 10px;
+      }
+
+      .status-complete {
+        background-color: #27ae60;
+        color: white;
+      }
+
+      .status-incomplete {
+        background-color: #e74c3c;
+        color: white;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🎓 Credit-Based Grading System Test</h1>
+      <p>
+        This system calculates weighted final grades based on subject credits. Each subject
+        contributes to the final grade proportionally to its credit value.
+      </p>
+
+      <div class="form-group">
+        <label for="studentSelect">Select Student:</label>
+        <select id="studentSelect">
+          <option value="">-- Loading Students --</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="yearSelect">Select Year:</label>
+        <select id="yearSelect">
+          <option value="1">Year 1</option>
+          <option value="2">Year 2</option>
+          <option value="3">Year 3</option>
+          <option value="4">Year 4</option>
+        </select>
+      </div>
+
+      <button onclick="calculateWeightedGrade()">Calculate Credit-Weighted Grade</button>
+
+      <div id="results" class="results">
+        <div id="loading" class="loading" style="display: none">
+          <p>🔄 Calculating weighted grade...</p>
+        </div>
+
+        <div id="gradeResults" style="display: none">
+          <!-- Results will be populated here -->
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // Load students on page load
+      document.addEventListener('DOMContentLoaded', function () {
+        loadStudents();
+      });
+
+      async function loadStudents() {
+        try {
+          const response = await fetch('index.php', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'action=get_students',
+          });
+
+          const students = await response.json();
+          const select = document.getElementById('studentSelect');
+
+          select.innerHTML = '<option value="">-- Select a Student --</option>';
+          students.forEach((student) => {
+            const option = document.createElement('option');
+            option.value = student.id;
+            option.textContent = `${student.name} (ID: ${student.id})`;
+            select.appendChild(option);
+          });
+        } catch (error) {
+          console.error('Error loading students:', error);
+          document.getElementById('studentSelect').innerHTML =
+            '<option value="">Error loading students</option>';
+        }
+      }
+
+      async function calculateWeightedGrade() {
+        const studentId = document.getElementById('studentSelect').value;
+        const year = document.getElementById('yearSelect').value;
+
+        if (!studentId) {
+          alert('Please select a student');
+          return;
+        }
+
+        const resultsDiv = document.getElementById('results');
+        const loadingDiv = document.getElementById('loading');
+        const gradeResultsDiv = document.getElementById('gradeResults');
+
+        // Show loading state
+        resultsDiv.style.display = 'block';
+        loadingDiv.style.display = 'block';
+        gradeResultsDiv.style.display = 'none';
+
+        try {
+          const response = await fetch('index.php', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=calculate_weighted_grade&student_id=${studentId}&year=${year}`,
+          });
+
+          const result = await response.json();
+
+          // Hide loading
+          loadingDiv.style.display = 'none';
+
+          if (result.error) {
+            gradeResultsDiv.innerHTML = `<div class="error">❌ Error: ${result.error}</div>`;
+          } else {
+            displayGradeResults(result);
+          }
+
+          gradeResultsDiv.style.display = 'block';
+        } catch (error) {
+          loadingDiv.style.display = 'none';
+          gradeResultsDiv.innerHTML = `<div class="error">❌ Network Error: ${error.message}</div>`;
+          gradeResultsDiv.style.display = 'block';
+        }
+      }
+
+      function displayGradeResults(result) {
+        const gradeResultsDiv = document.getElementById('gradeResults');
+
+        let html = '';
+
+        // Status message
+        if (result.overall_status === 'complete') {
+          html += `<div class="success">✅ All subjects completed for Year ${result.year}</div>`;
+        } else {
+          html += `<div class="error">⚠️ ${result.overall_status}</div>`;
+        }
+
+        // Final grade (if available)
+        if (result.final_grade !== null) {
+          html += `
+                    <div class="final-grade">
+                        <h3>Final Weighted Grade: ${result.final_grade.toFixed(2)}</h3>
+                        <p>Percentage: ${result.grade_percentage.toFixed(1)}%</p>
+                        <p>Credit-weighted calculation across all subjects</p>
+                    </div>
+                `;
+        }
+
+        // Subject breakdown
+        if (result.subjects_breakdown && result.subjects_breakdown.length > 0) {
+          html += '<h3>📚 Subject Breakdown:</h3>';
+          html += '<div class="grade-breakdown">';
+
+          result.subjects_breakdown.forEach((subject) => {
+            const statusClass = subject.has_grade ? 'status-complete' : 'status-incomplete';
+            const statusText = subject.has_grade ? 'Complete' : 'Missing Grade';
+
+            html += `
+                        <div class="subject-card">
+                            <div class="subject-name">
+                                ${subject.subject_name}
+                                <span class="status-badge ${statusClass}">${statusText}</span>
+                            </div>
+                            <div class="subject-details">
+                                <strong>Credits:</strong> ${subject.credits}<br>
+                                <strong>Credit Weight:</strong> ${(
+                                  subject.credit_weight * 100
+                                ).toFixed(1)}%<br>
+                                ${
+                                  subject.has_grade
+                                    ? `<strong>Grade:</strong> ${subject.grade}<br>
+                                     <strong>Weighted Score:</strong> ${subject.weighted_score.toFixed(
+                                       2
+                                     )}`
+                                    : '<strong>Status:</strong> No grade recorded'
+                                }
+                            </div>
+                        </div>
+                    `;
+          });
+
+          html += '</div>';
+        }
+
+        // Summary statistics
+        if (result.final_grade !== null) {
+          const totalCredits = result.subjects_breakdown.reduce(
+            (sum, subject) => sum + subject.credits,
+            0
+          );
+          const completedSubjects = result.subjects_breakdown.filter(
+            (subject) => subject.has_grade
+          ).length;
+
+          html += `
+                    <div style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 6px;">
+                        <h4>📊 Summary Statistics:</h4>
+                        <p><strong>Total Credits:</strong> ${totalCredits}</p>
+                        <p><strong>Completed Subjects:</strong> ${completedSubjects}/${result.subjects_breakdown.length}</p>
+                        <p><strong>Calculation Method:</strong> Σ(Grade × Credit Weight) for all subjects</p>
+                    </div>
+                `;
+        }
+
+        gradeResultsDiv.innerHTML = html;
+      }
+    </script>
+  </body>
+</html>
