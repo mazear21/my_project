@@ -9,6 +9,7 @@ This system manages student information, grades, subjects, and graduation proces
 ## ✨ Features
 
 ### Core Functionality
+
 - 👥 **Student Management** - Add, edit, delete, and track students
 - 📚 **Subject Management** - Manage courses with credit weighting
 - 📊 **Grading System** - Credit-weighted final grade calculation
@@ -18,18 +19,19 @@ This system manages student information, grades, subjects, and graduation proces
 - 📅 **Class Schedules** - Weekly timetables for all classes
 
 ### Grading System
+
 - **Mark Components:**
   - Final Exam (max 60 points)
   - Midterm Exam (max 20 points)
   - Quizzes (max 10 points)
   - Daily Activities (max 10 points)
-  
 - **Credit-Weighted Calculation:**
   ```
   Final Grade = Total Mark × (Credits ÷ 100)
   ```
 
 ### Academic Structure
+
 - **Year 1 Subjects** (50 credits total)
 - **Year 2 Subjects** (50 credits total)
 - **Graduation** = Year 1 Final Grade + Year 2 Final Grade (max 100 points)
@@ -45,6 +47,7 @@ This system manages student information, grades, subjects, and graduation proces
 ## 📦 Installation
 
 ### Prerequisites
+
 - XAMPP (or similar) with Apache
 - PostgreSQL 13+
 - PHP 8.0+
@@ -52,12 +55,14 @@ This system manages student information, grades, subjects, and graduation proces
 ### Setup Steps
 
 1. **Clone the repository:**
+
    ```bash
    git clone https://github.com/yourusername/my_project.git
    cd my_project
    ```
 
 2. **Enable PostgreSQL in PHP:**
+
    - Open `C:\xampp\php\php.ini`
    - Uncomment these lines:
      ```ini
@@ -67,17 +72,20 @@ This system manages student information, grades, subjects, and graduation proces
    - Restart Apache
 
 3. **Create the database:**
+
    ```sql
    CREATE DATABASE student_db;
    ```
 
 4. **Configure database connection:**
+
    - Edit `db.php` with your credentials:
      ```php
      $conn = pg_connect("host=localhost dbname=student_db user=postgres password=yourpassword");
      ```
 
 5. **Import database structure:**
+
    ```bash
    psql -U postgres student_db < setup_database.php
    ```
@@ -90,6 +98,7 @@ This system manages student information, grades, subjects, and graduation proces
 ## 📊 Database Schema
 
 ### Tables
+
 - `students` - Student information
 - `subjects` - Course catalog
 - `marks` - Student grades
@@ -99,25 +108,30 @@ This system manages student information, grades, subjects, and graduation proces
 ## 🎯 Usage
 
 ### Dashboard
+
 View key performance indicators and charts
 
 ### Students Page
+
 - Add new students
 - Edit student information
 - Promote students (Year 1 → Year 2)
 - Graduate students (Year 2 → Graduated)
 
 ### Subjects Page
+
 - Manage course catalog
 - Set credit values
 - Assign to Year 1 or Year 2
 
 ### Marks Page
+
 - Enter student grades
 - Automatic final grade calculation
 - Filter by student, subject, or year
 
 ### Graduated Page
+
 - View graduated students
 - Calculate graduation grades
 - Export graduation records
@@ -125,16 +139,19 @@ View key performance indicators and charts
 ## 💾 Backup
 
 ### Web-based Backup
+
 ```
 http://localhost/my_project/quick_backup.php
 ```
 
 ### Command Line Backup
+
 ```bash
 pg_dump -U postgres student_db > backup.sql
 ```
 
 ### Automated Daily Backup
+
 Run `DAILY_BACKUP.bat` (Windows)
 
 ## 📚 Documentation

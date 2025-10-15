@@ -587,6 +587,26 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_mark') {
 }
 
 // Handle getting Year 2 subjects for promotion
+// AJAX endpoint to check promotion eligibility
+if (isset($_POST['action']) && $_POST['action'] === 'check_promotion_eligibility') {
+    header('Content-Type: application/json');
+    
+    $student_id = (int)$_POST['student_id'];
+    
+    if ($student_id > 0) {
+        $eligibility = checkPromotionEligibility($conn, $student_id);
+        echo json_encode($eligibility);
+    } else {
+        echo json_encode([
+            'eligible' => false,
+            'message' => 'Invalid student ID',
+            'details' => []
+        ]);
+    }
+    
+    exit;
+}
+
 if (isset($_POST['action']) && $_POST['action'] === 'get_year2_subjects') {
     header('Content-Type: application/json');
     
@@ -619,6 +639,20 @@ if (isset($_POST['action']) && $_POST['action'] === 'promote_student_with_subjec
         if ($student_result && pg_num_rows($student_result) > 0) {
             $student = pg_fetch_assoc($student_result);
             
+            // Check promotion eligibility FIRST
+            $eligibility = checkPromotionEligibility($conn, $student_id);
+            
+            if (!$eligibility['eligible']) {
+                // Return JSON error with details
+                echo json_encode([
+                    'success' => false,
+                    'message' => $eligibility['message'],
+                    'details' => $eligibility['details']
+                ]);
+                exit;
+            }
+            
+            // Student is eligible, proceed with promotion
             // Begin transaction
             pg_query($conn, "BEGIN");
             
@@ -630,6 +664,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'promote_student_with_subjec
                 if (!$update_result) {
                     throw new Exception("Error updating student year");
                 }
+                
+                // Record promotion history
+                $history_query = "INSERT INTO promotion_history (student_id, from_year, to_year, promotion_date) VALUES ($1, 1, 2, CURRENT_DATE)";
+                pg_query_params($conn, $history_query, array($student_id));
                 
                 // Create marks entries for selected Year 2 subjects
                 foreach ($selected_subjects as $subject_id) {
@@ -644,19 +682,35 @@ if (isset($_POST['action']) && $_POST['action'] === 'promote_student_with_subjec
                 // Commit transaction
                 pg_query($conn, "COMMIT");
                 
-                header("Location: ?page=students&success=" . urlencode("Student promoted successfully and enrolled in Year 2 subjects!"));
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Student promoted to Year 2!',
+                    'details' => $eligibility['details']
+                ]);
                 exit;
                 
             } catch (Exception $e) {
                 // Rollback on error
                 pg_query($conn, "ROLLBACK");
-                $error_message = "Error promoting student: " . $e->getMessage();
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Error promoting student: ' . $e->getMessage()
+                ]);
+                exit;
             }
         } else {
-            $error_message = "Student not found or not eligible for promotion (must be active Year 1 student).";
+            echo json_encode([
+                'success' => false,
+                'message' => 'Student not found or not eligible for promotion (must be active Year 1 student).'
+            ]);
+            exit;
         }
     } else {
-        $error_message = "Invalid student ID or subject selection.";
+        echo json_encode([
+            'success' => false,
+            'message' => 'Invalid student ID or subject selection.'
+        ]);
+        exit;
     }
 }
 
@@ -672,7 +726,20 @@ if (isset($_POST['action']) && $_POST['action'] === 'promote_student') {
         if ($student_result && pg_num_rows($student_result) > 0) {
             $student = pg_fetch_assoc($student_result);
             
-            // Update student to Year 2
+            // Check promotion eligibility
+            $eligibility = checkPromotionEligibility($conn, $student_id);
+            
+            if (!$eligibility['eligible']) {
+                // Return JSON error with details
+                echo json_encode([
+                    'success' => false,
+                    'message' => $eligibility['message'],
+                    'details' => $eligibility['details']
+                ]);
+                exit;
+            }
+            
+            // Student is eligible, proceed with promotion
             $update_query = "UPDATE students SET year = 2 WHERE id = $1";
             $update_result = pg_query_params($conn, $update_query, array($student_id));
             
@@ -681,16 +748,32 @@ if (isset($_POST['action']) && $_POST['action'] === 'promote_student') {
                 $history_query = "INSERT INTO promotion_history (student_id, from_year, to_year, promotion_date) VALUES ($1, 1, 2, CURRENT_DATE)";
                 pg_query_params($conn, $history_query, array($student_id));
                 
-                header("Location: ?page=students&success=" . urlencode("Student promoted to Year 2 successfully!"));
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Student promoted to Year 2 successfully!',
+                    'details' => $eligibility['details']
+                ]);
                 exit;
             } else {
-                $error_message = "Error promoting student: " . pg_last_error($conn);
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Error promoting student: ' . pg_last_error($conn)
+                ]);
+                exit;
             }
         } else {
-            $error_message = "Student not found or not eligible for promotion (must be active Year 1 student).";
+            echo json_encode([
+                'success' => false,
+                'message' => 'Student not found or not eligible for promotion (must be active Year 1 student).'
+            ]);
+            exit;
         }
     } else {
-        $error_message = "Invalid student ID.";
+        echo json_encode([
+            'success' => false,
+            'message' => 'Invalid student ID.'
+        ]);
+        exit;
     }
 }
 
@@ -706,45 +789,66 @@ if (isset($_POST['action']) && $_POST['action'] === 'graduate_student') {
         if ($student_result && pg_num_rows($student_result) > 0) {
             $student = pg_fetch_assoc($student_result);
             
-            // Calculate graduation grade and check eligibility
-            $graduation_data = calculateGraduationGrade($conn, $student_id);
+            // Check graduation eligibility (Year 2 only)
+            $eligibility = checkGraduationEligibility($conn, $student_id);
             
-            // Validate graduation eligibility
-            if ($graduation_data['graduation_status'] !== 'graduated') {
-                $status_messages = [
-                    'incomplete' => "Student cannot graduate: Missing grades for both Year 1 and Year 2",
-                    'year1_complete' => "Student cannot graduate: Year 2 subjects not completed ({$graduation_data['year2_subjects_completed']}/{$graduation_data['year2_subjects_total']} completed)",
-                    'year2_complete' => "Student cannot graduate: Year 1 subjects not completed ({$graduation_data['year1_subjects_completed']}/{$graduation_data['year1_subjects_total']} completed)",
-                    'failed' => "Student cannot graduate: Total grade {$graduation_data['graduation_grade']}/100 is below 50% requirement"
-                ];
-                $error_message = $status_messages[$graduation_data['graduation_status']] ?? "Student is not eligible for graduation";
+            if (!$eligibility['eligible']) {
+                // Return JSON error with details
+                echo json_encode([
+                    'success' => false,
+                    'message' => $eligibility['message'],
+                    'details' => $eligibility['details']
+                ]);
+                exit;
+            }
+            
+            // Student is eligible, calculate full graduation grade for records
+            $graduation_data = calculateGraduationGrade($conn, $student_id);
+            $graduation_grade = $graduation_data['graduation_grade'];
+            
+            // Insert into graduated_students table with graduation grade
+            $graduate_query = "INSERT INTO graduated_students (student_id, student_name, age, gender, class_level, email, phone, graduation_date, final_year, graduation_grade) 
+                              VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, 2, $8)";
+            $graduate_result = pg_query_params($conn, $graduate_query, array(
+                $student['id'], $student['name'], $student['age'], $student['gender'], 
+                $student['class_level'], $student['email'], $student['phone'], $graduation_grade
+            ));
+            
+            if ($graduate_result) {
+                // Update student status to graduated
+                $update_query = "UPDATE students SET status = 'graduated' WHERE id = $1";
+                pg_query_params($conn, $update_query, array($student_id));
+                
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Student graduated successfully! Final Grade: ' . round($graduation_grade, 2) . '/100',
+                    'details' => [
+                        'graduation_grade' => round($graduation_grade, 2),
+                        'year1_grade' => $graduation_data['year1_grade'],
+                        'year2_grade' => $graduation_data['year2_grade']
+                    ]
+                ]);
+                exit;
             } else {
-                $graduation_grade = $graduation_data['graduation_grade'];
-                
-                // Insert into graduated_students table with graduation grade
-                $graduate_query = "INSERT INTO graduated_students (student_id, student_name, age, gender, class_level, email, phone, graduation_date, final_year, graduation_grade) 
-                                  VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, 2, $8)";
-                $graduate_result = pg_query_params($conn, $graduate_query, array(
-                    $student['id'], $student['name'], $student['age'], $student['gender'], 
-                    $student['class_level'], $student['email'], $student['phone'], $graduation_grade
-                ));
-                
-                if ($graduate_result) {
-                    // Update student status to graduated
-                    $update_query = "UPDATE students SET status = 'graduated' WHERE id = $1";
-                    pg_query_params($conn, $update_query, array($student_id));
-                    
-                    header("Location: ?page=students&success=" . urlencode("Student graduated successfully! Final Grade: {$graduation_grade}/100 ({$graduation_data['graduation_percentage']}%)"));
-                    exit;
-                } else {
-                    $error_message = "Error graduating student: " . pg_last_error($conn);
-                }
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'Error graduating student: ' . pg_last_error($conn)
+                ]);
+                exit;
             }
         } else {
-            $error_message = "Student not found or not eligible for graduation (must be active Year 2 student).";
+            echo json_encode([
+                'success' => false,
+                'message' => 'Student not found or not eligible for graduation (must be active Year 2 student).'
+            ]);
+            exit;
         }
     } else {
-        $error_message = "Invalid student ID.";
+        echo json_encode([
+            'success' => false,
+            'message' => 'Invalid student ID.'
+        ]);
+        exit;
     }
 }
 
@@ -1600,6 +1704,224 @@ function calculateCreditWeightedGrade($conn, $student_id, $year) {
 }
 
 // Function to calculate graduation grade (Year 1 + Year 2 final grades)
+// Check if Year 1 student is eligible for promotion to Year 2
+function checkPromotionEligibility($conn, $student_id) {
+    // Get all Year 1 marks for the student with subject details
+    $query = "
+        SELECT 
+            m.id,
+            m.mark,
+            m.final_grade,
+            s.subject_name,
+            s.credits
+        FROM marks m
+        INNER JOIN subjects s ON m.subject_id = s.id
+        WHERE m.student_id = $1 AND s.year = 1
+        ORDER BY s.subject_name
+    ";
+    $result = pg_query_params($conn, $query, array($student_id));
+    
+    if (!$result) {
+        return [
+            'eligible' => false,
+            'message' => 'Error checking eligibility: ' . pg_last_error($conn),
+            'details' => []
+        ];
+    }
+    
+    $marks = pg_fetch_all($result);
+    
+    if (!$marks || count($marks) === 0) {
+        return [
+            'eligible' => false,
+            'message' => 'Student has no Year 1 marks recorded. Please add marks for all Year 1 subjects first.',
+            'details' => []
+        ];
+    }
+    
+    // Check how many Year 1 subjects exist
+    $subjects_query = "SELECT COUNT(*) as total FROM subjects WHERE year = 1";
+    $subjects_result = pg_query($conn, $subjects_query);
+    $subjects_data = pg_fetch_assoc($subjects_result);
+    $total_year1_subjects = (int)$subjects_data['total'];
+    
+    if (count($marks) < $total_year1_subjects) {
+        return [
+            'eligible' => false,
+            'message' => 'Student has incomplete Year 1 subjects. Completed: ' . count($marks) . '/' . $total_year1_subjects,
+            'details' => [
+                'completed_subjects' => count($marks),
+                'total_subjects' => $total_year1_subjects
+            ]
+        ];
+    }
+    
+    $total_final_grade = 0;
+    $failed_subjects = [];
+    
+    foreach ($marks as $mark) {
+        $total_final_grade += floatval($mark['final_grade']);
+        
+        // Check if subject is failed (mark < 50)
+        if (floatval($mark['mark']) < 50) {
+            $failed_subjects[] = [
+                'subject' => $mark['subject_name'],
+                'mark' => floatval($mark['mark']),
+                'credits' => floatval($mark['credits'])
+            ];
+        }
+    }
+    
+    // Check both conditions
+    $has_minimum_grade = $total_final_grade >= 25;
+    $has_no_failed_subjects = count($failed_subjects) === 0;
+    
+    if (!$has_minimum_grade || !$has_no_failed_subjects) {
+        $reasons = [];
+        
+        if (!$has_minimum_grade) {
+            $reasons[] = "Total Final Grade: " . round($total_final_grade, 2) . "/50 (Required: ≥25)";
+        }
+        
+        if (!$has_no_failed_subjects) {
+            $reasons[] = "Failed Subjects: " . count($failed_subjects);
+        }
+        
+        return [
+            'eligible' => false,
+            'message' => 'Student does not meet promotion requirements',
+            'details' => [
+                'total_final_grade' => round($total_final_grade, 2),
+                'required_grade' => 25,
+                'has_minimum_grade' => $has_minimum_grade,
+                'failed_subjects' => $failed_subjects,
+                'has_failed_subjects' => !$has_no_failed_subjects,
+                'reasons' => $reasons
+            ]
+        ];
+    }
+    
+    return [
+        'eligible' => true,
+        'message' => 'Student is eligible for promotion to Year 2',
+        'details' => [
+            'total_final_grade' => round($total_final_grade, 2),
+            'required_grade' => 25,
+            'completed_subjects' => count($marks),
+            'total_subjects' => $total_year1_subjects
+        ]
+    ];
+}
+
+// Check if Year 2 student is eligible for graduation
+function checkGraduationEligibility($conn, $student_id) {
+    // Get all Year 2 marks for the student with subject details
+    $query = "
+        SELECT 
+            m.id,
+            m.mark,
+            m.final_grade,
+            s.subject_name,
+            s.credits
+        FROM marks m
+        INNER JOIN subjects s ON m.subject_id = s.id
+        WHERE m.student_id = $1 AND s.year = 2
+        ORDER BY s.subject_name
+    ";
+    $result = pg_query_params($conn, $query, array($student_id));
+    
+    if (!$result) {
+        return [
+            'eligible' => false,
+            'message' => 'Error checking eligibility: ' . pg_last_error($conn),
+            'details' => []
+        ];
+    }
+    
+    $marks = pg_fetch_all($result);
+    
+    if (!$marks || count($marks) === 0) {
+        return [
+            'eligible' => false,
+            'message' => 'Student has no Year 2 marks recorded. Please add marks for all Year 2 subjects first.',
+            'details' => []
+        ];
+    }
+    
+    // Check how many Year 2 subjects exist
+    $subjects_query = "SELECT COUNT(*) as total FROM subjects WHERE year = 2";
+    $subjects_result = pg_query($conn, $subjects_query);
+    $subjects_data = pg_fetch_assoc($subjects_result);
+    $total_year2_subjects = (int)$subjects_data['total'];
+    
+    if (count($marks) < $total_year2_subjects) {
+        return [
+            'eligible' => false,
+            'message' => 'Student has incomplete Year 2 subjects. Completed: ' . count($marks) . '/' . $total_year2_subjects,
+            'details' => [
+                'completed_subjects' => count($marks),
+                'total_subjects' => $total_year2_subjects
+            ]
+        ];
+    }
+    
+    $total_final_grade = 0;
+    $failed_subjects = [];
+    
+    foreach ($marks as $mark) {
+        $total_final_grade += floatval($mark['final_grade']);
+        
+        // Check if subject is failed (mark < 50)
+        if (floatval($mark['mark']) < 50) {
+            $failed_subjects[] = [
+                'subject' => $mark['subject_name'],
+                'mark' => floatval($mark['mark']),
+                'credits' => floatval($mark['credits'])
+            ];
+        }
+    }
+    
+    // Check both conditions
+    $has_minimum_grade = $total_final_grade >= 25;
+    $has_no_failed_subjects = count($failed_subjects) === 0;
+    
+    if (!$has_minimum_grade || !$has_no_failed_subjects) {
+        $reasons = [];
+        
+        if (!$has_minimum_grade) {
+            $reasons[] = "Total Final Grade: " . round($total_final_grade, 2) . "/50 (Required: ≥25)";
+        }
+        
+        if (!$has_no_failed_subjects) {
+            $reasons[] = "Failed Subjects: " . count($failed_subjects);
+        }
+        
+        return [
+            'eligible' => false,
+            'message' => 'Student does not meet graduation requirements',
+            'details' => [
+                'total_final_grade' => round($total_final_grade, 2),
+                'required_grade' => 25,
+                'has_minimum_grade' => $has_minimum_grade,
+                'failed_subjects' => $failed_subjects,
+                'has_failed_subjects' => !$has_no_failed_subjects,
+                'reasons' => $reasons
+            ]
+        ];
+    }
+    
+    return [
+        'eligible' => true,
+        'message' => 'Student is eligible for graduation',
+        'details' => [
+            'total_final_grade' => round($total_final_grade, 2),
+            'required_grade' => 25,
+            'completed_subjects' => count($marks),
+            'total_subjects' => $total_year2_subjects
+        ]
+    ];
+}
+
 function calculateGraduationGrade($conn, $student_id) {
     // Calculate Year 1 final grade
     $year1_query = "
@@ -2638,6 +2960,321 @@ if ($page == 'reports') {
         .grade-c { background: #fed7aa; color: #ea580c; }
         .grade-f { background: #fecaca; color: #dc2626; }
 
+        /* ===== EXPANDABLE STUDENT ROWS ===== */
+        .student-main-row {
+            cursor: pointer;
+            background: white;
+            transition: all 0.3s ease;
+            border-left: 4px solid transparent !important;
+        }
+
+        .student-main-row:hover {
+            background: #f8f9fa !important;
+            border-left-color: var(--primary-color) !important;
+        }
+
+        .student-main-row.expanded {
+            background: #f0f7ff !important;
+            border-left-color: var(--primary-color) !important;
+        }
+
+        .student-name-cell {
+            font-weight: 600;
+            color: #1e3a8a;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .expand-icon {
+            display: inline-block;
+            transition: transform 0.3s ease;
+            font-size: 0.9rem;
+            color: #64748b;
+        }
+
+        .student-main-row.expanded .expand-icon {
+            transform: rotate(90deg);
+        }
+
+        .subject-details-row {
+            display: none;
+            background: #f8fafc;
+            border-left: 4px solid #3b82f6 !important;
+        }
+
+        .subject-details-row.show {
+            display: table-row;
+            animation: slideDown 0.3s ease;
+        }
+
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .subject-details-container {
+            padding: 1rem 1.5rem;
+        }
+
+        .subject-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #1e3a8a;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .subject-marks-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .subject-marks-table th {
+            background: #e0f2fe;
+            color: #0c4a6e;
+            padding: 0.6rem;
+            font-size: 0.8rem;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .subject-marks-table td {
+            padding: 0.7rem;
+            text-align: center;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 0.85rem;
+        }
+
+        .subject-marks-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .subject-marks-table tr:hover {
+            background: #f0f9ff;
+        }
+
+        .mark-input-inline {
+            width: 60px;
+            padding: 0.4rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 4px;
+            text-align: center;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        .mark-input-inline:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+        }
+
+        .inline-edit-btn {
+            padding: 0.3rem 0.7rem;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .inline-edit-btn:hover {
+            background: #2563eb;
+            transform: translateY(-1px);
+        }
+
+        .inline-delete-btn {
+            padding: 0.3rem 0.7rem;
+            background: #dc2626;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .inline-delete-btn:hover {
+            background: #b91c1c;
+            transform: translateY(-1px);
+        }
+
+        .manage-marks-btn {
+            padding: 0.4rem 1rem;
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 2px 4px rgba(59, 130, 246, 0.2);
+        }
+
+        .manage-marks-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(59, 130, 246, 0.3);
+        }
+
+        .total-subjects-badge {
+            background: #dbeafe;
+            color: #1e40af;
+            padding: 0.3rem 0.7rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .final-grade-display {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #3b82f6;
+        }
+
+        /* ===== LOADING OVERLAY ===== */
+        .loading-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(3px);
+            z-index: 99999;
+            justify-content: center;
+            align-items: center;
+            animation: fadeIn 0.15s ease;
+        }
+
+        .loading-overlay.active {
+            display: flex;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+
+        .loading-content {
+            background: white;
+            padding: 1.5rem 2.5rem;
+            border-radius: 12px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            animation: slideUp 0.2s ease;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(15px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .loading-spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #e0e7ff;
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            margin: 0 auto 1rem;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #1e3a8a;
+            margin-bottom: 0.5rem;
+            font-family: 'Poppins', sans-serif;
+        }
+
+        .loading-subtext {
+            font-size: 0.9rem;
+            color: #64748b;
+            font-family: 'Poppins', sans-serif;
+        }
+
+        .loading-dots {
+            display: inline-block;
+            width: 1ch;
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: ''; }
+            40% { content: '.'; }
+            60% { content: '..'; }
+            80%, 100% { content: '...'; }
+        }
+
+        .loading-dots::after {
+            content: '';
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+
+        /* Success message animation */
+        .success-message {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            margin: 1rem 2rem;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+            animation: slideInDown 0.5s ease;
+        }
+
+        @keyframes slideInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .error-message {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            margin: 1rem 2rem;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+            animation: slideInDown 0.5s ease;
+        }
+
         /* ===== RESPONSIVE DESIGN ===== */
         @media (max-width: 768px) {
             .container { padding: 1rem; }
@@ -2654,6 +3291,15 @@ if ($page == 'reports') {
     </style>
 </head>
 <body>
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="loading-content">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Processing<span class="loading-dots"></span></div>
+            <div class="loading-subtext">Please wait while we update your data</div>
+        </div>
+    </div>
+
     <nav>
         <div class="nav-container">
             <div class="nav-brand">
@@ -2679,6 +3325,9 @@ if ($page == 'reports') {
             </div>
         </div>
     </nav>
+
+    <!-- Notification Container (for AJAX messages) -->
+    <div id="notificationContainer" style="position: fixed; top: 80px; right: 20px; z-index: 10000; max-width: 400px;"></div>
 
     <!-- Notification Messages -->
     <?php if (isset($success_message)): ?>
@@ -2712,7 +3361,10 @@ if ($page == 'reports') {
                                 <span data-translate="view_data_for">View Data For:</span>
                             </div>
                             <div class="year-toggle-switch">
-                                <input type="radio" id="year-1" name="year-filter" value="1" checked>
+                                <input type="radio" id="year-all" name="year-filter" value="" checked>
+                                <label for="year-all" data-translate="all_years">All Years</label>
+                                
+                                <input type="radio" id="year-1" name="year-filter" value="1">
                                 <label for="year-1" data-translate="year_1_only">Year 1 Only</label>
                                 
                                 <input type="radio" id="year-2" name="year-filter" value="2">
@@ -3281,6 +3933,14 @@ if ($page == 'reports') {
                                     <input type="text" id="reportsSearchStudent" class="premium-select" placeholder="Search by student name..." data-translate-placeholder="search_by_student_name" onkeyup="filterReportsTable()">
                                 </div>
                                 <div class="filter-section">
+                                    <label class="filter-label" data-translate="academic_year">Academic Year</label>
+                                    <select id="reportsFilterYear" class="premium-select" onchange="filterReportsTable()">
+                                        <option value="" data-translate="all_years">All Years</option>
+                                        <option value="1" data-translate="year_1">Year 1</option>
+                                        <option value="2" data-translate="year_2">Year 2</option>
+                                    </select>
+                                </div>
+                                <div class="filter-section">
                                     <label class="filter-label" data-translate="filter_by_class">Filter by Class</label>
                                     <select id="reportsFilterClass" class="premium-select" onchange="filterReportsTable()">
                                         <option value="" data-translate="all_classes">All Classes</option>
@@ -3294,33 +3954,6 @@ if ($page == 'reports') {
                                             endwhile; 
                                         }
                                         ?>
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="filter_by_subject">Filter by Subject</label>
-                                    <select id="reportsFilterSubject" class="premium-select" onchange="filterReportsTable()">
-                                        <option value="" data-translate="all_subjects">All Subjects</option>
-                                        <?php
-                                        $subjects = pg_query($conn, "SELECT id, subject_name FROM subjects ORDER BY subject_name");
-                                        if ($subjects && pg_num_rows($subjects) > 0) {
-                                            while($subject = pg_fetch_assoc($subjects)):
-                                        ?>
-                                        <option value="<?= htmlspecialchars($subject['subject_name']) ?>"><?= htmlspecialchars($subject['subject_name']) ?></option>
-                                        <?php 
-                                            endwhile;
-                                        }
-                                        ?>
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="filter_by_grade">Filter by Grade</label>
-                                    <select id="reportsFilterGrade" class="premium-select" onchange="filterReportsTable()">
-                                        <option value="" data-translate="all_grades">All Grades</option>
-                                        <option value="A+">A+</option>
-                                        <option value="A">A</option>
-                                        <option value="B">B</option>
-                                        <option value="C">C</option>
-                                        <option value="F">F</option>
                                     </select>
                                 </div>
                                 <button class="clear-filters-btn" onclick="clearReportsFilters()" data-translate="clear_filters">
@@ -3343,109 +3976,191 @@ if ($page == 'reports') {
                                     <thead>
                                         <tr>
                                             <th data-translate="student_name">Student Name</th>
-                                            <th data-translate="class">Class</th>
-                                            <th data-translate="subject">Subject</th>
-                                            <th data-translate="final">Final</th>
-                                            <th data-translate="midterm">Midterm</th>
-                                            <th data-translate="quizzes">Quizzes</th>
-                                            <th data-translate="daily">Daily</th>
-                                            <th data-translate="total">Total</th>
-                                            <th data-translate="final_grade">Final Grade</th>
-                                            <th data-translate="grade">Grade</th>
+                                            <th style="text-align: center;" data-translate="year">Year</th>
+                                            <th style="text-align: center;" data-translate="class">Class</th>
+                                            <th style="text-align: center;" data-translate="total_subjects">Subjects</th>
+                                            <th style="text-align: center;" data-translate="final_grade">Final Grade</th>
+                                            <th style="text-align: center;" data-translate="actions">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody id="reportsTableBody">
                                         <?php
-                                        $reports_query = "
-                                            SELECT 
-                                                m.id as mark_id,
+                                        // Get all students with marks, grouped by student
+                                        $students_query = "
+                                            SELECT DISTINCT
                                                 s.id as student_id,
                                                 s.name as student_name,
                                                 s.year as student_year,
-                                                s.class_level,
-                                                sub.subject_name,
-                                                sub.year as subject_year,
-                                                sub.credits,
-                                                m.final_exam as final_mark,
-                                                m.midterm_exam as midterm_mark,
-                                                m.quizzes as quizzes_mark,
-                                                m.daily_activities as daily_mark,
-                                                m.mark as total_mark,
-                                                m.final_grade,
-                                                CASE 
-                                                    WHEN m.mark >= 90 THEN 'A+'
-                                                    WHEN m.mark >= 80 THEN 'A'
-                                                    WHEN m.mark >= 70 THEN 'B'
-                                                    WHEN m.mark >= 50 THEN 'C'
-                                                    ELSE 'F'
-                                                END as grade
+                                                s.class_level
                                             FROM students s
                                             JOIN marks m ON s.id = m.student_id
-                                            JOIN subjects sub ON m.subject_id = sub.id
-                                            WHERE m.mark > 0
-                                            ORDER BY s.name, sub.subject_name
-                                            LIMIT 50
+                                            ORDER BY s.name
                                         ";
-                                        $reports_result = pg_query($conn, $reports_query);
+                                        $students_result = pg_query($conn, $students_query);
                                         
-                                        // Pre-calculate graduation grades for reports (optimized approach)
-                                        $reports_graduation_grades = array();
-                                        if ($reports_result && pg_num_rows($reports_result) > 0) {
-                                            // First pass: collect all unique student IDs
-                                            $all_reports = array();
-                                            $unique_students = array();
-                                            
-                                            while($temp_report = pg_fetch_assoc($reports_result)) {
-                                                $all_reports[] = $temp_report;
-                                                if (!in_array($temp_report['student_id'], $unique_students)) {
-                                                    $unique_students[] = $temp_report['student_id'];
+                                        if ($students_result && pg_num_rows($students_result) > 0):
+                                            while($student = pg_fetch_assoc($students_result)):
+                                                $student_id = $student['student_id'];
+                                                
+                                                // Get marks for this student
+                                                $marks_query = pg_prepare($conn, "marks_for_student_" . $student_id, "
+                                                    SELECT 
+                                                        m.id as mark_id,
+                                                        sub.subject_name,
+                                                        sub.year as subject_year,
+                                                        sub.credits,
+                                                        m.final_exam,
+                                                        m.midterm_exam,
+                                                        m.quizzes,
+                                                        m.daily_activities,
+                                                        m.mark as total_mark,
+                                                        m.final_grade,
+                                                        CASE 
+                                                            WHEN m.mark >= 90 THEN 'A+'
+                                                            WHEN m.mark >= 80 THEN 'A'
+                                                            WHEN m.mark >= 70 THEN 'B'
+                                                            WHEN m.mark >= 50 THEN 'C'
+                                                            ELSE 'F'
+                                                        END as grade
+                                                    FROM marks m
+                                                    JOIN subjects sub ON m.subject_id = sub.id
+                                                    WHERE m.student_id = $1
+                                                    ORDER BY sub.year, sub.subject_name
+                                                ");
+                                                $marks_result = pg_execute($conn, "marks_for_student_" . $student_id, array($student_id));
+                                                $student_marks = pg_fetch_all($marks_result);
+                                                $total_subjects = count($student_marks);
+                                                
+                                                // Group marks by year and calculate totals
+                                                $marks_by_year = [];
+                                                $year_totals = [];
+                                                if ($student_marks) {
+                                                    foreach ($student_marks as $mark) {
+                                                        $year = $mark['subject_year'];
+                                                        if (!isset($marks_by_year[$year])) {
+                                                            $marks_by_year[$year] = [];
+                                                            $year_totals[$year] = 0;
+                                                        }
+                                                        $marks_by_year[$year][] = $mark;
+                                                        $year_totals[$year] += floatval($mark['final_grade']);
+                                                    }
                                                 }
-                                            }
-                                            
-                                            // Calculate year-specific grades for unique students
-                                            foreach($unique_students as $student_id) {
+                                                
+                                                // Calculate student's year-specific final grade
                                                 $graduation_result = calculateGraduationGrade($conn, $student_id);
-                                                $reports_graduation_grades[$student_id] = array(
-                                                    'year1_grade' => $graduation_result['success'] ? $graduation_result['year1_grade'] : 0,
-                                                    'year2_grade' => $graduation_result['success'] ? $graduation_result['year2_grade'] : 0,
-                                                    'total_grade' => $graduation_result['success'] ? ($graduation_result['year1_grade'] + $graduation_result['year2_grade']) : 0
-                                                );
-                                            }
-                                        }
-                                        
-                                        if (!empty($all_reports)):
-                                            foreach($all_reports as $report):
-                                                $grade_class = 'grade-' . strtolower(str_replace('+', '-plus', $report['grade']));
-                                                
-                                                // Get pre-calculated year-specific grade for this student
-                                                $year_grades = $reports_graduation_grades[$report['student_id']] ?? array('year1_grade' => 0, 'year2_grade' => 0);
-                                                
-                                                // Show grade based on the SUBJECT's year, not student's current year
-                                                $display_grade = 0;
-                                                if ($report['subject_year'] == 1) {
-                                                    $display_grade = $year_grades['year1_grade'];
-                                                } elseif ($report['subject_year'] == 2) {
-                                                    $display_grade = $year_grades['year2_grade'];
+                                                $year1_grade = 0;
+                                                $year2_grade = 0;
+                                                $total_grade = 0;
+                                                if ($graduation_result['success']) {
+                                                    $year1_grade = $graduation_result['year1_grade'];
+                                                    $year2_grade = $graduation_result['year2_grade'];
+                                                    $total_grade = $year1_grade + $year2_grade;
                                                 }
                                         ?>
-                                        <tr>
-                                            <td><?= htmlspecialchars($report['student_name']) ?></td>
-                                            <td><?= htmlspecialchars($report['class_level']) ?></td>
-                                            <td><?= htmlspecialchars($report['subject_name']) ?></td>
-                                            <td><?= intval($report['final_mark']) ?></td>
-                                            <td><?= intval($report['midterm_mark']) ?></td>
-                                            <td><?= intval($report['quizzes_mark']) ?></td>
-                                            <td><?= intval($report['daily_mark']) ?></td>
-                                            <td><strong><?= intval($report['total_mark']) ?></strong></td>
-                                            <td><strong style="color: #3498db;"><?= number_format($display_grade, 2) ?></strong></td>
-                                            <td><span class="grade-badge <?= $grade_class ?>"><?= $report['grade'] ?></span></td>
+                                        <!-- Student Main Row (Clickable) -->
+                                        <tr class="student-main-row" onclick="toggleStudentDetails(<?= $student_id ?>)" data-student-id="<?= $student_id ?>">
+                                            <td>
+                                                <div class="student-name-cell">
+                                                    <span class="expand-icon">▶</span>
+                                                    <strong><?= htmlspecialchars($student['student_name']) ?></strong>
+                                                </div>
+                                            </td>
+                                            <td style="text-align: center;">
+                                                <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
+                                                             background: <?= $student['student_year'] == 1 ? '#dbeafe' : '#dcfce7' ?>; 
+                                                             color: <?= $student['student_year'] == 1 ? '#1e40af' : '#166534' ?>;">
+                                                    Year <?= $student['student_year'] ?>
+                                                </span>
+                                            </td>
+                                            <td style="text-align: center;">
+                                                <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
+                                                             background: #f3f4f6; color: #374151;">
+                                                    <?= htmlspecialchars($student['class_level']) ?>
+                                                </span>
+                                            </td>
+                                            <td style="text-align: center;">
+                                                <span class="total-subjects-badge"><?= $total_subjects ?> subjects</span>
+                                            </td>
+                                            <td style="text-align: center;">
+                                                <span class="final-grade-display"><?= number_format($total_grade, 2) ?></span>
+                                            </td>
+                                            <td style="text-align: center;" onclick="event.stopPropagation();">
+                                                <button class="manage-marks-btn" onclick="toggleStudentDetails(<?= $student_id ?>)">
+                                                    📋 View Details
+                                                </button>
+                                            </td>
+                                        </tr>
+                                        
+                                        <!-- Subject Details Row (Expandable) -->
+                                        <tr class="subject-details-row" id="details-<?= $student_id ?>">
+                                            <td colspan="6">
+                                                <div class="subject-details-container">
+                                                    <div class="subject-title">📚 Subject Marks</div>
+                                                    <table class="subject-marks-table">
+                                                        <thead>
+                                                            <tr>
+                                                                <th>Subject</th>
+                                                                <th>Final (60)</th>
+                                                                <th>Midterm (20)</th>
+                                                                <th>Quiz (10)</th>
+                                                                <th>Daily (10)</th>
+                                                                <th>Total</th>
+                                                                <th>Grade</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            <?php 
+                                                            if ($student_marks && count($student_marks) > 0):
+                                                                ksort($marks_by_year); // Sort by year
+                                                                foreach ($marks_by_year as $year => $year_marks):
+                                                            ?>
+                                                                <?php foreach($year_marks as $mark): 
+                                                                    $grade_class = 'grade-' . strtolower(str_replace('+', '-plus', $mark['grade']));
+                                                                ?>
+                                                                <tr>
+                                                                    <td style="text-align: left; font-weight: 500;">
+                                                                        <?= htmlspecialchars($mark['subject_name']) ?>
+                                                                    </td>
+                                                                    <td><?= intval($mark['final_exam']) ?></td>
+                                                                    <td><?= intval($mark['midterm_exam']) ?></td>
+                                                                    <td><?= intval($mark['quizzes']) ?></td>
+                                                                    <td><?= intval($mark['daily_activities']) ?></td>
+                                                                    <td><strong><?= intval($mark['total_mark']) ?></strong></td>
+                                                                    <td>
+                                                                        <span class="grade-badge <?= $grade_class ?>"><?= $mark['grade'] ?></span>
+                                                                    </td>
+                                                                </tr>
+                                                                <?php endforeach; ?>
+                                                                <!-- Year Total Row -->
+                                                                <tr style="background: linear-gradient(135deg, <?= $year == 1 ? '#dbeafe' : '#f3e8ff' ?> 0%, <?= $year == 1 ? '#bfdbfe' : '#e9d5ff' ?> 100%); font-weight: 600; border-top: 2px solid <?= $year == 1 ? '#3b82f6' : '#a855f7' ?>;">
+                                                                    <td colspan="6" style="text-align: left; padding: 12px; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1rem;">
+                                                                        📊 Year <?= $year ?> Total Credits
+                                                                    </td>
+                                                                    <td style="text-align: center; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1.1rem;">
+                                                                        <strong><?= number_format($year_totals[$year], 2) ?></strong>
+                                                                    </td>
+                                                                </tr>
+                                                            <?php 
+                                                                endforeach;
+                                                            else:
+                                                            ?>
+                                                                <tr>
+                                                                    <td colspan="7" style="text-align: center; padding: 2rem; color: var(--text-light);">
+                                                                        No marks recorded yet
+                                                                    </td>
+                                                                </tr>
+                                                            <?php endif; ?>
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </td>
                                         </tr>
                                         <?php 
-                                            endforeach;
+                                            endwhile;
                                         else:
                                         ?>
                                         <tr>
-                                            <td colspan="10" style="text-align: center; color: var(--text-light); padding: 2rem;">
+                                            <td colspan="6" style="text-align: center; color: var(--text-light); padding: 2rem;">
                                                 No reports available. Add some student marks to see data here.
                                             </td>
                                         </tr>
@@ -3469,7 +4184,7 @@ if ($page == 'reports') {
                     <!-- Add Student Form -->
                     <div class="filter-panel" data-aos="fade-up">
                         <h3 class="filter-title" data-translate="add_new_student">➕ Add New Student</h3>
-                        <form method="POST" action="" onsubmit="event.preventDefault(); submitFormAjax(this);">
+                        <form method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'students');">
                             <input type="hidden" name="action" value="add_student">
                             <div class="filter-sections">
                                 <div class="filter-section">
@@ -3734,7 +4449,7 @@ if ($page == 'reports') {
                                                 <button class="export-btn" onclick="handleStudentAction('promote_student', <?= $student['id'] ?>)" 
                                                         style="background: #10B981; color: white; margin: 2px;" data-translate="promote">📈 Promote</button>
                                             <?php elseif ($student['year'] == 2): ?>
-                                                <button class="export-btn" onclick="handleStudentAction('graduate_student', <?= $student['id'] ?>)" 
+                                                <button class="export-btn" onclick="graduateStudent(<?= $student['id'] ?>)" 
                                                         style="background: #F59E0B; color: white; margin: 2px;" data-translate="graduate">🎓 Graduate</button>
                                             <?php endif; ?>
                                         </td>
@@ -3872,7 +4587,7 @@ if ($page == 'reports') {
                     <!-- Add Subject Form -->
                     <div class="filter-panel" data-aos="fade-up">
                         <h3 class="filter-title" data-translate="add_new_subject">➕ Add New Subject</h3>
-                        <form method="POST" action="" onsubmit="event.preventDefault(); submitFormAjax(this);">
+                        <form method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'subjects');">
                             <input type="hidden" name="action" value="add_subject">
                             <div class="filter-sections">
                                 <div class="filter-section">
@@ -3994,62 +4709,6 @@ if ($page == 'reports') {
                     <p class="dashboard-subtitle" data-translate="input_manage_marks">Input and manage student marks</p>
                 </div>
                 <div class="reports-main-content">
-                    <!-- Add Mark Form -->
-                    <div class="filter-panel" data-aos="fade-up">
-                        <h3 class="filter-title" data-translate="add_new_mark">➕ Add New Mark</h3>
-                        <form method="POST" action="" onsubmit="event.preventDefault(); submitFormAjax(this);">
-                            <input type="hidden" name="action" value="add_mark">
-                            <div class="filter-sections">
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="academic_year">Academic Year</label>
-                                    <select id="marksAcademicYear" name="academic_year" class="premium-select" onchange="filterMarkStudentsAndSubjects()" required>
-                                        <option value="" data-translate="select_academic_year">Select Academic Year</option>
-                                        <option value="1" data-translate="year_1">Year 1</option>
-                                        <option value="2" data-translate="year_2">Year 2</option>
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="class_level">Class</label>
-                                    <select id="marksClassLevel" name="class_level" class="premium-select" onchange="filterMarkStudentsAndSubjects()" required>
-                                        <option value="" data-translate="select_class">Select Class</option>
-                                        <!-- Options will be populated by JavaScript based on year selection -->
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="student">Student</label>
-                                    <select name="student_id" id="marksStudentSelect" class="premium-select" required>
-                                        <option value="" data-translate="select_student">Select Student</option>
-                                        <!-- Students will be populated by JavaScript based on year selection -->
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="subject">Subject</label>
-                                    <select name="subject_id" id="marksSubjectSelect" class="premium-select" required>
-                                        <option value="" data-translate="select_subject">Select Subject</option>
-                                        <!-- Subjects will be populated by JavaScript based on year selection -->
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="final_exam_range">Final Exam (0-60)</label>
-                                    <input type="number" name="final_exam" class="premium-select" min="0" max="60" required>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="midterm_range">Midterm (0-20)</label>
-                                    <input type="number" name="midterm_exam" class="premium-select" min="0" max="20" required>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="quizzes_range">Quizzes (0-10)</label>
-                                    <input type="number" name="quizzes" class="premium-select" min="0" max="10" required>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="daily_range">Daily Activities (0-10)</label>
-                                    <input type="number" name="daily_activities" class="premium-select" min="0" max="10" required>
-                                </div>
-                                <button type="submit" class="apply-filters-btn" data-translate="add_mark">Add Mark</button>
-                            </div>
-                        </form>
-                    </div>
-
                     <!-- Marks List -->
                     <div class="data-table-section" data-aos="fade-up">
                         <div class="section-header">
@@ -4066,18 +4725,10 @@ if ($page == 'reports') {
                             <div class="filter-sections">
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="academic_year">Academic Year</label>
-                                    <select id="filterMarksYear" class="premium-select" onchange="updateMarksClassFilter(); updateMarksSubjectFilter(); filterMarks()">
+                                    <select id="filterMarksYear" class="premium-select" onchange="updateMarksClassFilter(); filterMarks()">
                                         <option value="" data-translate="all_years">All Years</option>
                                         <option value="1" data-translate="year_1">Year 1</option>
                                         <option value="2" data-translate="year_2">Year 2</option>
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="filter_by_status">Student Status</label>
-                                    <select id="filterStudentStatus" class="premium-select" onchange="filterMarks()">
-                                        <option value="" data-translate="all_status">All Status</option>
-                                        <option value="active" data-translate="active_students">Active Students</option>
-                                        <option value="graduated" data-translate="graduated_students">Graduated Students</option>
                                     </select>
                                 </div>
                                 <div class="filter-section">
@@ -4089,34 +4740,7 @@ if ($page == 'reports') {
                                 </div>
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="search">Search</label>
-                                    <input type="text" id="searchMarks" class="premium-select" placeholder="Search by student name or subject..." data-translate-placeholder="search_by_student_subject" onkeyup="filterMarks()">
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="filter_by_subject">Filter by Subject</label>
-                                    <select id="filterSubject" class="premium-select" onchange="filterMarks()">
-                                        <option value="" data-translate="all_subjects">All Subjects</option>
-                                        <!-- Options will be populated dynamically based on year filter -->
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="filter_by_grade">Filter by Grade</label>
-                                    <select id="filterGrade" class="premium-select" onchange="filterMarks()">
-                                        <option value="" data-translate="all_grades">All Grades</option>
-                                        <option value="A+">A+</option>
-                                        <option value="A">A</option>
-                                        <option value="B">B</option>
-                                        <option value="C">C</option>
-                                        <option value="F">F</option>
-                                    </select>
-                                </div>
-                                <div class="filter-section">
-                                    <label class="filter-label" data-translate="filter_by_status">Filter by Status</label>
-                                    <select id="filterStatus" class="premium-select" onchange="filterMarks()">
-                                        <option value="" data-translate="all_status">All Status</option>
-                                        <option value="Pass">Pass</option>
-                                        <option value="Fail">Fail</option>
-                                        <option value="Pending">Pending</option>
-                                    </select>
+                                    <input type="text" id="searchMarks" class="premium-select" placeholder="Search by student name..." data-translate-placeholder="search_by_student_name" onkeyup="filterMarks()">
                                 </div>
                                 <div class="filter-section">
                                     <button class="clear-filters-btn" onclick="clearMarksFilters()" style="margin-top: 1.5rem;" data-translate="clear_filters">
@@ -4132,126 +4756,202 @@ if ($page == 'reports') {
                                     <tr>
                                         <th data-translate="student">Student</th>
                                         <th style="text-align: center;" data-translate="year">Year</th>
-                                        <th style="text-align: center;" data-translate="class_level">Class Level</th>
-                                        <th style="text-align: center;" data-translate="student_status">Status</th>
-                                        <th data-translate="subject">Subject</th>
-                                        <th style="text-align: center;" data-translate="final">Final</th>
-                                        <th style="text-align: center;" data-translate="midterm">Midterm</th>
-                                        <th style="text-align: center;" data-translate="quizzes">Quizzes</th>
-                                        <th style="text-align: center;" data-translate="daily">Daily</th>
-                                        <th style="text-align: center;" data-translate="total">Total</th>
+                                        <th style="text-align: center;" data-translate="class_level">Class</th>
+                                        <th style="text-align: center;" data-translate="total_subjects">Subjects</th>
                                         <th style="text-align: center;" data-translate="final_grade">Final Grade</th>
-                                        <th style="text-align: center;" data-translate="grade">Grade</th>
-                                        <th style="text-align: center;" data-translate="status">Status</th>
                                         <th style="text-align: center;" data-translate="actions">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php
-                                    // First, get all unique student IDs and pre-calculate their year-specific grades
-                                    $student_year_grades = array();
-                                    
-                                    $students_query = "SELECT DISTINCT student_id FROM marks";
-                                    $students_result = pg_query($conn, $students_query);
-                                    
-                                    if ($students_result) {
-                                        while($student_row = pg_fetch_assoc($students_result)) {
-                                            $student_id = $student_row['student_id'];
-                                            $graduation_result = calculateGraduationGrade($conn, $student_id);
-                                            
-                                            // Store both year grades separately
-                                            $student_year_grades[$student_id] = array(
-                                                'year1_grade' => $graduation_result['success'] ? $graduation_result['year1_grade'] : 0,
-                                                'year2_grade' => $graduation_result['success'] ? $graduation_result['year2_grade'] : 0,
-                                                'total_grade' => $graduation_result['success'] ? ($graduation_result['year1_grade'] + $graduation_result['year2_grade']) : 0
-                                            );
-                                        }
-                                    }
-                                    
-                                    // Now get marks data
-                                    $marks_query = "
-                                        SELECT 
-                                            m.*,
+                                    // Get all students with marks, grouped by student
+                                    $students_marks_query = "
+                                        SELECT DISTINCT
+                                            s.id as student_id,
                                             s.name as student_name,
                                             s.year as student_year,
-                                            s.status as student_status,
-                                            s.class_level as student_class,
-                                            sub.subject_name,
-                                            sub.year as subject_year,
-                                            CASE 
-                                                WHEN m.mark >= 90 THEN 'A+'
-                                                WHEN m.mark >= 80 THEN 'A'
-                                                WHEN m.mark >= 70 THEN 'B'
-                                                WHEN m.mark >= 50 THEN 'C'
-                                                ELSE 'F'
-                                            END as grade
-                                        FROM marks m
-                                        JOIN students s ON m.student_id = s.id
-                                        JOIN subjects sub ON m.subject_id = sub.id
-                                        ORDER BY m.id
+                                            s.class_level,
+                                            s.status as student_status
+                                        FROM students s
+                                        JOIN marks m ON s.id = m.student_id
+                                        ORDER BY s.name
                                     ";
-                                    $marks_result = pg_query($conn, $marks_query);
+                                    $students_marks_result = pg_query($conn, $students_marks_query);
                                     
-                                    if ($marks_result && pg_num_rows($marks_result) > 0):
-                                        while($mark = pg_fetch_assoc($marks_result)):
-                                            $grade_class = 'grade-' . strtolower(str_replace('+', '-plus', $mark['grade']));
+                                    if ($students_marks_result && pg_num_rows($students_marks_result) > 0):
+                                        while($student = pg_fetch_assoc($students_marks_result)):
+                                            $student_id = $student['student_id'];
                                             
-                                            // Get pre-calculated year-specific grade for this student
-                                            $year_grades = $student_year_grades[$mark['student_id']] ?? array('year1_grade' => 0, 'year2_grade' => 0);
+                                            // Get marks for this student
+                                            $marks_for_student_query = "
+                                                SELECT 
+                                                    m.id as mark_id,
+                                                    sub.subject_name,
+                                                    sub.year as subject_year,
+                                                    sub.credits,
+                                                    m.final_exam,
+                                                    m.midterm_exam,
+                                                    m.quizzes,
+                                                    m.daily_activities,
+                                                    m.mark as total_mark,
+                                                    m.final_grade,
+                                                    m.status,
+                                                    CASE 
+                                                        WHEN m.mark >= 90 THEN 'A+'
+                                                        WHEN m.mark >= 80 THEN 'A'
+                                                        WHEN m.mark >= 70 THEN 'B'
+                                                        WHEN m.mark >= 50 THEN 'C'
+                                                        ELSE 'F'
+                                                    END as grade
+                                                FROM marks m
+                                                JOIN subjects sub ON m.subject_id = sub.id
+                                                WHERE m.student_id = $1
+                                                ORDER BY sub.year, sub.subject_name
+                                            ";
+                                            $marks_params = array($student_id);
+                                            $marks_for_student_result = pg_query_params($conn, $marks_for_student_query, $marks_params);
+                                            $student_marks = pg_fetch_all($marks_for_student_result);
+                                            $total_subjects = count($student_marks);
                                             
-                                            // Show grade based on the SUBJECT's year, not student's current year
-                                            $display_grade = 0;
-                                            if ($mark['subject_year'] == 1) {
-                                                $display_grade = $year_grades['year1_grade'];
-                                            } elseif ($mark['subject_year'] == 2) {
-                                                $display_grade = $year_grades['year2_grade'];
+                                            // Group marks by year and calculate totals
+                                            $marks_by_year = [];
+                                            $year_totals = [];
+                                            if ($student_marks) {
+                                                foreach ($student_marks as $mark) {
+                                                    $year = $mark['subject_year'];
+                                                    if (!isset($marks_by_year[$year])) {
+                                                        $marks_by_year[$year] = [];
+                                                        $year_totals[$year] = 0;
+                                                    }
+                                                    $marks_by_year[$year][] = $mark;
+                                                    $year_totals[$year] += floatval($mark['final_grade']);
+                                                }
+                                            }
+                                            
+                                            // Calculate student's year-specific final grade
+                                            $graduation_result = calculateGraduationGrade($conn, $student_id);
+                                            $year1_grade = 0;
+                                            $year2_grade = 0;
+                                            $total_grade = 0;
+                                            if ($graduation_result['success']) {
+                                                $year1_grade = $graduation_result['year1_grade'];
+                                                $year2_grade = $graduation_result['year2_grade'];
+                                                $total_grade = $year1_grade + $year2_grade;
                                             }
                                     ?>
-                                    <tr data-year="<?= $mark['student_year'] ?>" data-student-status="<?= $mark['student_status'] ?>" data-class="<?= $mark['student_class'] ?>">
-                                        <td><?= htmlspecialchars($mark['student_name']) ?></td>
-                                        <td style="text-align: center; vertical-align: middle;">
-                                            <span style="padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
-                                                         background: <?= $mark['student_year'] == 1 ? '#dbeafe' : '#dcfce7' ?>; 
-                                                         color: <?= $mark['student_year'] == 1 ? '#1e40af' : '#166534' ?>;
-                                                         display: inline-block; min-width: 50px; text-align: center;">
-                                                <span data-translate="year">Year</span> <?= $mark['student_year'] ?>
-                                            </span>
+                                    <!-- Student Main Row (Clickable) -->
+                                    <tr class="student-main-row" onclick="toggleStudentDetails(<?= $student_id ?>)" 
+                                        data-student-id="<?= $student_id ?>"
+                                        data-year="<?= $student['student_year'] ?>" 
+                                        data-student-status="<?= $student['student_status'] ?>" 
+                                        data-class="<?= $student['class_level'] ?>">
+                                        <td>
+                                            <div class="student-name-cell">
+                                                <span class="expand-icon">▶</span>
+                                                <strong><?= htmlspecialchars($student['student_name']) ?></strong>
+                                            </div>
                                         </td>
-                                        <td style="text-align: center; vertical-align: middle;">
-                                            <span style="padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
-                                                         background: #f3f4f6; color: #374151;
-                                                         display: inline-block; min-width: 50px; text-align: center;">
-                                                <span data-translate="class_level">Class Level</span> <?= htmlspecialchars($mark['student_class']) ?>
-                                            </span>
-                                        </td>
-                                        <td style="text-align: center; vertical-align: middle;">
-                                            <span style="padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
-                                                         background: <?= $mark['student_status'] == 'active' ? '#dcfce7' : '#f3f4f6' ?>; 
-                                                         color: <?= $mark['student_status'] == 'active' ? '#166534' : '#6b7280' ?>;
-                                                         display: inline-block; min-width: 60px; text-align: center;">
-                                                <?= $mark['student_status'] == 'active' ? '<span data-translate="active">Active</span>' : '<span data-translate="graduated">Graduated</span>' ?>
-                                            </span>
-                                        </td>
-                                        <td><?= htmlspecialchars($mark['subject_name']) ?></td>
-                                        <td style="text-align: center;"><?= (int)$mark['final_exam'] ?></td>
-                                        <td style="text-align: center;"><?= (int)$mark['midterm_exam'] ?></td>
-                                        <td style="text-align: center;"><?= (int)$mark['quizzes'] ?></td>
-                                        <td style="text-align: center;"><?= (int)$mark['daily_activities'] ?></td>
-                                        <td style="text-align: center;"><strong><?= (int)$mark['mark'] ?></strong></td>
-                                        <td style="text-align: center;"><strong style="color: #3498db;"><?= number_format($display_grade, 2) ?></strong></td>
-                                        <td style="text-align: center;"><span class="grade-badge <?= $grade_class ?>"><?= $mark['grade'] ?></span></td>
                                         <td style="text-align: center;">
-                                            <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
-                                                         background: <?= $mark['status'] == 'Pass' ? '#dcfce7' : ($mark['status'] == 'Fail' ? '#fecaca' : '#fef3c7') ?>; 
-                                                         color: <?= $mark['status'] == 'Pass' ? '#166534' : ($mark['status'] == 'Fail' ? '#dc2626' : '#d97706') ?>;
-                                                         display: inline-block; min-width: 50px; text-align: center;">
-                                                <?= htmlspecialchars($mark['status']) ?>
+                                            <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
+                                                         background: <?= $student['student_year'] == 1 ? '#dbeafe' : '#dcfce7' ?>; 
+                                                         color: <?= $student['student_year'] == 1 ? '#1e40af' : '#166534' ?>;">
+                                                Year <?= $student['student_year'] ?>
                                             </span>
                                         </td>
                                         <td style="text-align: center;">
-                                            <button class="export-btn" onclick="editMark(<?= $mark['id'] ?>)" style="margin: 2px;" data-translate="edit">✏️ Edit</button>
-                                            <button class="export-btn" onclick="handleMarkAction('delete_mark', <?= $mark['id'] ?>)" 
-                                                    style="background: var(--danger-color); color: white; margin: 2px;" data-translate="delete">🗑️ Delete</button>
+                                            <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
+                                                         background: #f3f4f6; color: #374151;">
+                                                <?= htmlspecialchars($student['class_level']) ?>
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <span class="total-subjects-badge"><?= $total_subjects ?> subjects</span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <span class="final-grade-display"><?= number_format($total_grade, 2) ?></span>
+                                        </td>
+                                        <td style="text-align: center;" onclick="event.stopPropagation();">
+                                            <button class="manage-marks-btn" onclick="toggleStudentDetails(<?= $student_id ?>)">
+                                                📝 Manage Marks
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    
+                                    <!-- Subject Details Row (Expandable) with Inline Editing -->
+                                    <tr class="subject-details-row" id="details-<?= $student_id ?>">
+                                        <td colspan="6">
+                                            <div class="subject-details-container">
+                                                <div class="subject-title">📚 Subject Marks - Click Edit to modify</div>
+                                                <table class="subject-marks-table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>Subject</th>
+                                                            <th>Final (60)</th>
+                                                            <th>Midterm (20)</th>
+                                                            <th>Quiz (10)</th>
+                                                            <th>Daily (10)</th>
+                                                            <th>Total</th>
+                                                            <th>Grade</th>
+                                                            <th>Status</th>
+                                                            <th>Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        <?php 
+                                                        if ($student_marks && count($student_marks) > 0):
+                                                            ksort($marks_by_year); // Sort by year
+                                                            foreach ($marks_by_year as $year => $year_marks):
+                                                        ?>
+                                                            <?php foreach($year_marks as $mark): 
+                                                                $grade_class = 'grade-' . strtolower(str_replace('+', '-plus', $mark['grade']));
+                                                            ?>
+                                                            <tr>
+                                                                <td style="text-align: left; font-weight: 500;">
+                                                                    <?= htmlspecialchars($mark['subject_name']) ?>
+                                                                </td>
+                                                                <td><?= intval($mark['final_exam']) ?></td>
+                                                                <td><?= intval($mark['midterm_exam']) ?></td>
+                                                                <td><?= intval($mark['quizzes']) ?></td>
+                                                                <td><?= intval($mark['daily_activities']) ?></td>
+                                                                <td><strong><?= intval($mark['total_mark']) ?></strong></td>
+                                                                <td>
+                                                                    <span class="grade-badge <?= $grade_class ?>"><?= $mark['grade'] ?></span>
+                                                                </td>
+                                                                <td>
+                                                                    <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;
+                                                                                 background: <?= $mark['status'] == 'Pass' ? '#dcfce7' : ($mark['status'] == 'Fail' ? '#fecaca' : '#fef3c7') ?>; 
+                                                                                 color: <?= $mark['status'] == 'Pass' ? '#166534' : ($mark['status'] == 'Fail' ? '#dc2626' : '#d97706') ?>;">
+                                                                        <?= htmlspecialchars($mark['status']) ?>
+                                                                    </span>
+                                                                </td>
+                                                                <td>
+                                                                    <button class="inline-edit-btn" onclick="editMark(<?= $mark['mark_id'] ?>)">✏️ Edit</button>
+                                                                    <button class="inline-delete-btn" onclick="handleMarkAction('delete_mark', <?= $mark['mark_id'] ?>)">🗑️</button>
+                                                                </td>
+                                                            </tr>
+                                                            <?php endforeach; ?>
+                                                            <!-- Year Total Row -->
+                                                            <tr style="background: linear-gradient(135deg, <?= $year == 1 ? '#dbeafe' : '#f3e8ff' ?> 0%, <?= $year == 1 ? '#bfdbfe' : '#e9d5ff' ?> 100%); font-weight: 600; border-top: 2px solid <?= $year == 1 ? '#3b82f6' : '#a855f7' ?>;">
+                                                                <td colspan="8" style="text-align: left; padding: 12px; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1rem;">
+                                                                    📊 Year <?= $year ?> Total Credits
+                                                                </td>
+                                                                <td style="text-align: center; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1.1rem;">
+                                                                    <strong><?= number_format($year_totals[$year], 2) ?></strong>
+                                                                </td>
+                                                            </tr>
+                                                        <?php 
+                                                            endforeach;
+                                                        else:
+                                                        ?>
+                                                            <tr>
+                                                                <td colspan="9" style="text-align: center; padding: 2rem; color: var(--text-light);">
+                                                                    No marks recorded yet
+                                                                </td>
+                                                            </tr>
+                                                        <?php endif; ?>
+                                                    </tbody>
+                                                </table>
+                                            </div>
                                         </td>
                                     </tr>
                                     <?php 
@@ -4259,7 +4959,7 @@ if ($page == 'reports') {
                                     else:
                                     ?>
                                     <tr>
-                                        <td colspan="13" style="text-align: center; color: var(--text-light); padding: 2rem;">
+                                        <td colspan="6" style="text-align: center; color: var(--text-light); padding: 2rem;">
                                             No marks found. Add some marks to get started.
                                         </td>
                                     </tr>
@@ -4280,6 +4980,150 @@ if ($page == 'reports') {
             easing: 'ease-in-out',
             once: true,
             offset: 100
+        });
+
+        // ===== COUNT UP ANIMATION UTILITY =====
+        class CountUp {
+            constructor(element, options = {}) {
+                this.element = element;
+                this.target = parseFloat(options.target) || 0;
+                this.startValue = parseFloat(options.start) || 0;
+                this.duration = options.duration || 2000; // milliseconds
+                this.decimals = options.decimals !== undefined ? options.decimals : this.getDecimals(this.target);
+                this.separator = options.separator || ',';
+                this.suffix = options.suffix || '';
+                this.prefix = options.prefix || '';
+                this.easing = options.easing || this.easeOutExpo;
+                this.onComplete = options.onComplete || null;
+                
+                this.startTime = null;
+                this.animationFrame = null;
+            }
+            
+            getDecimals(num) {
+                const str = num.toString();
+                if (str.includes('.')) {
+                    const decimals = str.split('.')[1];
+                    if (parseInt(decimals) !== 0) {
+                        return decimals.length;
+                    }
+                }
+                return 0;
+            }
+            
+            // Easing function - exponential ease out for smooth spring-like effect
+            easeOutExpo(t) {
+                return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+            }
+            
+            // Alternative easing - cubic ease out
+            easeOutCubic(t) {
+                return 1 - Math.pow(1 - t, 3);
+            }
+            
+            formatNumber(num) {
+                const fixedNum = num.toFixed(this.decimals);
+                const parts = fixedNum.split('.');
+                
+                // Add thousand separators
+                if (this.separator) {
+                    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, this.separator);
+                }
+                
+                return this.prefix + parts.join('.') + this.suffix;
+            }
+            
+            animate(timestamp) {
+                if (!this.startTime) this.startTime = timestamp;
+                
+                const elapsed = timestamp - this.startTime;
+                const progress = Math.min(elapsed / this.duration, 1);
+                const easedProgress = this.easing(progress);
+                
+                const currentValue = this.startValue + (this.target - this.startValue) * easedProgress;
+                this.element.textContent = this.formatNumber(currentValue);
+                
+                if (progress < 1) {
+                    this.animationFrame = requestAnimationFrame((t) => this.animate(t));
+                } else {
+                    this.element.textContent = this.formatNumber(this.target);
+                    if (this.onComplete) this.onComplete();
+                }
+            }
+            
+            startAnimation() {
+                if (this.animationFrame) {
+                    cancelAnimationFrame(this.animationFrame);
+                }
+                this.startTime = null;
+                this.animationFrame = requestAnimationFrame((t) => this.animate(t));
+            }
+            
+            reset() {
+                if (this.animationFrame) {
+                    cancelAnimationFrame(this.animationFrame);
+                }
+                this.element.textContent = this.formatNumber(this.startValue);
+            }
+            
+            update(newTarget, newOptions = {}) {
+                this.startValue = parseFloat(this.element.textContent.replace(/[^0-9.-]/g, '')) || this.startValue;
+                this.target = newTarget;
+                if (newOptions.duration) this.duration = newOptions.duration;
+                if (newOptions.suffix !== undefined) this.suffix = newOptions.suffix;
+                if (newOptions.prefix !== undefined) this.prefix = newOptions.prefix;
+                this.startAnimation();
+            }
+        }
+        
+        // Intersection Observer for viewport detection
+        function observeKPICards() {
+            const kpiCards = document.querySelectorAll('.kpi-card');
+            
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting && !entry.target.dataset.animated) {
+                        entry.target.dataset.animated = 'true';
+                        
+                        const valueElement = entry.target.querySelector('.kpi-value');
+                        if (valueElement && valueElement.dataset.target) {
+                            const target = parseFloat(valueElement.dataset.target);
+                            const text = valueElement.textContent.trim();
+                            const suffix = text.includes('%') ? '%' : '';
+                            const prefix = text.includes('Class') ? 'Class ' : '';
+                            
+                            // Only animate numbers
+                            if (!isNaN(target)) {
+                                const counter = new CountUp(valueElement, {
+                                    target: target,
+                                    start: 0,
+                                    duration: 2000,
+                                    decimals: 0,
+                                    separator: '',
+                                    suffix: suffix,
+                                    prefix: prefix
+                                });
+                                
+                                // Store counter instance for later updates
+                                valueElement.countUpInstance = counter;
+                                counter.startAnimation();
+                            }
+                        }
+                    }
+                });
+            }, {
+                threshold: 0.2,
+                rootMargin: '0px 0px -50px 0px'
+            });
+            
+            kpiCards.forEach(card => observer.observe(card));
+        }
+        
+        // Initialize KPI animations on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                observeKPICards();
+            }, 100);
         });
 
         // Define updateGradeDistributionChart function globally so it's available immediately
@@ -5070,26 +5914,57 @@ if ($page == 'reports') {
                             const kpis = data.kpis;
                             console.log('KPI data received:', kpis);
                             
-                            // Update KPI values
-                            const kpiElements = [
-                                { selector: '.kpi-card:nth-child(1) .kpi-value', value: kpis.year1_students },
-                                { selector: '.kpi-card:nth-child(2) .kpi-value', value: kpis.year2_students },
-                                { selector: '.kpi-card:nth-child(3) .kpi-value', value: kpis.avg_score + '%' },
-                                { selector: '.kpi-card:nth-child(4) .kpi-value', value: 'Class ' + kpis.top_class },
-                                { selector: '.kpi-card:nth-child(4) .kpi-trend', value: kpis.top_class_score + '% score' },
-                                { selector: '.kpi-card:nth-child(5) .kpi-value', value: kpis.pass_rate + '%' },
-                                { selector: '.kpi-card:nth-child(6) .kpi-value', value: kpis.risk_subject },
-                                { selector: '.kpi-card:nth-child(6) .kpi-trend', value: kpis.risk_failure_rate + '% fail rate' },
-                            { selector: '.kpi-card:nth-child(7) .kpi-value', value: kpis.enrolled_students },
-                            { selector: '.kpi-card:nth-child(8) .kpi-value', value: kpis.excellence_rate + '%' }
-                        ];
+                            // Update KPI values with animation
+                            const kpiUpdates = [
+                                { selector: '.kpi-card:nth-child(1) .kpi-value', value: kpis.year1_students, suffix: '', prefix: '' },
+                                { selector: '.kpi-card:nth-child(2) .kpi-value', value: kpis.year2_students, suffix: '', prefix: '' },
+                                { selector: '.kpi-card:nth-child(3) .kpi-value', value: kpis.avg_score, suffix: '%', prefix: '' },
+                                { selector: '.kpi-card:nth-child(4) .kpi-value', value: kpis.top_class, suffix: '', prefix: 'Class ', isText: true },
+                                { selector: '.kpi-card:nth-child(4) .kpi-trend', value: kpis.top_class_score, suffix: '% score', prefix: '', isSmall: true },
+                                { selector: '.kpi-card:nth-child(5) .kpi-value', value: kpis.pass_rate, suffix: '%', prefix: '' },
+                                { selector: '.kpi-card:nth-child(6) .kpi-value', value: kpis.risk_subject, suffix: '', prefix: '', isText: true },
+                                { selector: '.kpi-card:nth-child(6) .kpi-trend', value: kpis.risk_failure_rate, suffix: '% fail rate', prefix: '', isSmall: true },
+                                { selector: '.kpi-card:nth-child(7) .kpi-value', value: kpis.enrolled_students, suffix: '', prefix: '' },
+                                { selector: '.kpi-card:nth-child(8) .kpi-value', value: kpis.excellence_rate, suffix: '%', prefix: '' }
+                            ];
 
-                        kpiElements.forEach(item => {
-                            const element = document.querySelector(item.selector);
-                            if (element) {
-                                element.textContent = item.value;
-                            }
-                        });
+                            kpiUpdates.forEach(item => {
+                                const element = document.querySelector(item.selector);
+                                if (element) {
+                                    // For text values (like subject names or class names), just update directly
+                                    if (item.isText) {
+                                        element.textContent = item.prefix + item.value + item.suffix;
+                                    } else {
+                                        // For numeric values, use CountUp animation
+                                        const numericValue = parseFloat(item.value);
+                                        if (!isNaN(numericValue)) {
+                                            if (element.countUpInstance) {
+                                                // Update existing counter
+                                                element.countUpInstance.update(numericValue, {
+                                                    duration: item.isSmall ? 1200 : 1800,
+                                                    suffix: item.suffix,
+                                                    prefix: item.prefix
+                                                });
+                                            } else {
+                                                // Create new counter
+                                                const counter = new CountUp(element, {
+                                                    target: numericValue,
+                                                    start: 0,
+                                                    duration: item.isSmall ? 1200 : 1800,
+                                                    decimals: item.value.toString().includes('.') ? 1 : 0,
+                                                    separator: '',
+                                                    suffix: item.suffix,
+                                                    prefix: item.prefix
+                                                });
+                                                element.countUpInstance = counter;
+                                                counter.startAnimation();
+                                            }
+                                        } else {
+                                            element.textContent = item.prefix + item.value + item.suffix;
+                                        }
+                                    }
+                                }
+                            });
 
                             // Restore card state
                             kpiCards.forEach(card => {
@@ -5134,9 +6009,9 @@ if ($page == 'reports') {
                 });
             });
 
-            // Load Year 1 data by default since it's the default selected filter
-            updateKPICards('1');
-            updateGradeDistributionChart('1');
+            // Load All Years data by default since it's the default selected filter
+            updateKPICards('');
+            updateGradeDistributionChart('');
             
             // Grade Distribution Chart (Doughnut)
             createGradeDistributionChart();
@@ -5396,6 +6271,209 @@ if ($page == 'reports') {
             return subjectMap[subject] || 'subject-cell';
         }
 
+        // Toggle student details (expandable rows)
+        function toggleStudentDetails(studentId) {
+            const mainRow = document.querySelector(`.student-main-row[data-student-id="${studentId}"]`);
+            const detailsRow = document.getElementById(`details-${studentId}`);
+            
+            if (!mainRow || !detailsRow) {
+                console.error('Student row not found:', studentId);
+                return;
+            }
+            
+            // Toggle expanded class on main row
+            mainRow.classList.toggle('expanded');
+            
+            // Toggle show class on details row
+            detailsRow.classList.toggle('show');
+            
+            // Optional: Close other expanded rows (uncomment if you want accordion behavior)
+            // document.querySelectorAll('.student-main-row.expanded').forEach(row => {
+            //     if (row.dataset.studentId != studentId) {
+            //         row.classList.remove('expanded');
+            //         document.getElementById(`details-${row.dataset.studentId}`).classList.remove('show');
+            //     }
+            // });
+        }
+
+        // Loading overlay functions
+        function showLoading(message = 'Processing', subtext = 'Please wait while we update your data') {
+            const overlay = document.getElementById('loadingOverlay');
+            const textElement = overlay.querySelector('.loading-text');
+            const subtextElement = overlay.querySelector('.loading-subtext');
+            
+            if (textElement) {
+                textElement.innerHTML = message + '<span class="loading-dots"></span>';
+            }
+            if (subtextElement) {
+                subtextElement.textContent = subtext;
+            }
+            
+            overlay.classList.add('active');
+        }
+
+        function hideLoading() {
+            const overlay = document.getElementById('loadingOverlay');
+            overlay.classList.remove('active');
+        }
+
+        // Notification functions
+        function showNotification(message, type = 'success') {
+            const container = document.getElementById('notificationContainer');
+            const notification = document.createElement('div');
+            notification.className = type === 'success' ? 'success-message' : 'error-message';
+            notification.style.marginBottom = '1rem';
+            notification.innerHTML = `
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>${type === 'success' ? '✅' : '❌'} ${message}</span>
+                    <button onclick="this.parentElement.parentElement.remove()" style="background: transparent; border: none; color: white; font-size: 1.2rem; cursor: pointer; padding: 0 0.5rem;">×</button>
+                </div>
+            `;
+            
+            container.appendChild(notification);
+            
+            // Auto-remove after 3 seconds (faster)
+            setTimeout(() => {
+                notification.style.animation = 'slideInDown 0.3s ease reverse';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+
+        // AJAX form submission helper
+        function submitFormAjax(form, onSuccess) {
+            showLoading('Saving Changes', 'Please wait...');
+            
+            const formData = new FormData(form);
+            
+            fetch('', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(data => {
+                hideLoading();
+                
+                // Check if response indicates success
+                if (data.includes('success') || data.includes('successfully')) {
+                    showNotification('Operation completed successfully!', 'success');
+                    if (typeof onSuccess === 'function') {
+                        onSuccess();
+                    }
+                } else if (data.includes('error') || data.includes('Error')) {
+                    showNotification('An error occurred. Please try again.', 'error');
+                } else {
+                    // Default: assume success and reload table
+                    showNotification('Changes saved!', 'success');
+                    if (typeof onSuccess === 'function') {
+                        onSuccess();
+                    }
+                }
+            })
+            .catch(error => {
+                hideLoading();
+                console.error('Error:', error);
+                showNotification('Network error. Please check your connection.', 'error');
+            });
+            
+            return false; // Prevent default form submission
+        }
+
+        // Form submit handler with page-specific reload
+        function handleFormSubmit(event, form, page = null, onSuccess = null) {
+            event.preventDefault();
+            
+            // Close modal immediately if callback provided
+            if (typeof onSuccess === 'function') {
+                onSuccess();
+            }
+            
+            showLoading('Saving Changes', 'Please wait...');
+            
+            const formData = new FormData(form);
+            
+            fetch('', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(data => {
+                hideLoading();
+                
+                // Check for success/error in response
+                const success = data.includes('successfully') || data.includes('Success');
+                const error = data.includes('Error:') || data.includes('error');
+                
+                if (success) {
+                    showNotification('✓ Saved successfully!', 'success');
+                    
+                    // Reset form if it's an add form
+                    if (formData.get('action').includes('add')) {
+                        form.reset();
+                        
+                        // Clear subject checkboxes
+                        form.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+                    }
+                    
+                    // Reload table data immediately
+                    reloadTableData(page);
+                } else if (error) {
+                    // Extract error message if possible
+                    const errorMatch = data.match(/Error: ([^<]+)/);
+                    const message = errorMatch ? errorMatch[1] : 'An error occurred';
+                    showNotification(message, 'error');
+                } else {
+                    // Assume success
+                    showNotification('✓ Updated!', 'success');
+                    reloadTableData(page);
+                }
+            })
+            .catch(error => {
+                hideLoading();
+                console.error('Error:', error);
+                showNotification('Network error. Please try again.', 'error');
+            });
+            
+            return false;
+        }
+
+        // Reload table data without full page refresh
+        function reloadTableData(page = null) {
+            const currentPage = page || new URLSearchParams(window.location.search).get('page') || 'reports';
+            
+            showLoading('Refreshing Data', 'Loading latest information...');
+            
+            fetch(`?page=${currentPage}`)
+                .then(response => response.text())
+                .then(html => {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+                    
+                    // Find the table in the response
+                    let tableId = '';
+                    if (currentPage === 'marks') tableId = 'marksTable';
+                    else if (currentPage === 'students') tableId = 'studentsTable';
+                    else if (currentPage === 'subjects') tableId = 'subjectsTable';
+                    else if (currentPage === 'reports') tableId = 'reportsTable';
+                    else if (currentPage === 'graduated') tableId = 'graduatedTable';
+                    
+                    if (tableId) {
+                        const newTable = doc.getElementById(tableId);
+                        const oldTable = document.getElementById(tableId);
+                        
+                        if (newTable && oldTable) {
+                            oldTable.innerHTML = newTable.innerHTML;
+                        }
+                    }
+                    
+                    hideLoading();
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Error reloading data:', error);
+                    showNotification('Failed to reload data. Please refresh the page.', 'error');
+                });
+        }
+
         // Filter functions
         function applyFilters() {
             const classFilter = document.getElementById('class-filter').value;
@@ -5644,73 +6722,198 @@ if ($page == 'reports') {
 
         function deleteStudent(studentId) {
             if (confirm('Are you sure you want to delete this student? This will also remove all their marks.')) {
-                // Create a form and submit it
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.style.display = 'none';
+                showLoading('Deleting Student', 'Please wait...');
                 
-                const actionInput = document.createElement('input');
-                actionInput.type = 'hidden';
-                actionInput.name = 'action';
-                actionInput.value = 'delete_student';
+                const formData = new FormData();
+                formData.append('action', 'delete_student');
+                formData.append('student_id', studentId);
                 
-                const idInput = document.createElement('input');
-                idInput.type = 'hidden';
-                idInput.name = 'student_id';
-                idInput.value = studentId;
-                
-                form.appendChild(actionInput);
-                form.appendChild(idInput);
-                document.body.appendChild(form);
-                form.submit();
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.text())
+                .then(data => {
+                    hideLoading();
+                    showNotification('Student deleted successfully!', 'success');
+                    setTimeout(() => {
+                        reloadTableData('students');
+                    }, 500);
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Error:', error);
+                    showNotification('Error deleting student', 'error');
+                });
             }
         }
 
         function promoteStudent(studentId) {
             if (confirm('Are you sure you want to promote this student from Year 1 to Year 2?')) {
-                // Create a form and submit it
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.style.display = 'none';
+                showLoading('Checking Eligibility', 'Validating student records...');
                 
-                const actionInput = document.createElement('input');
-                actionInput.type = 'hidden';
-                actionInput.name = 'action';
-                actionInput.value = 'promote_student';
+                const formData = new FormData();
+                formData.append('action', 'promote_student');
+                formData.append('student_id', studentId);
                 
-                const idInput = document.createElement('input');
-                idInput.type = 'hidden';
-                idInput.name = 'student_id';
-                idInput.value = studentId;
-                
-                form.appendChild(actionInput);
-                form.appendChild(idInput);
-                document.body.appendChild(form);
-                form.submit();
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    hideLoading();
+                    
+                    if (data.success) {
+                        showNotification('Student promoted to Year 2!', 'success');
+                        setTimeout(() => {
+                            reloadTableData('students');
+                        }, 500);
+                    } else {
+                        // Show detailed error modal
+                        showEligibilityErrorModal('Promotion', data);
+                    }
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Error:', error);
+                    showNotification('Network error. Please try again.', 'error');
+                });
             }
         }
 
         function graduateStudent(studentId) {
             if (confirm('Are you sure you want to graduate this student? This will move them to the graduated students list.')) {
-                // Create a form and submit it
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.style.display = 'none';
+                showLoading('Checking Eligibility', 'Validating student records...');
                 
-                const actionInput = document.createElement('input');
-                actionInput.type = 'hidden';
-                actionInput.name = 'action';
-                actionInput.value = 'graduate_student';
+                const formData = new FormData();
+                formData.append('action', 'graduate_student');
+                formData.append('student_id', studentId);
                 
-                const idInput = document.createElement('input');
-                idInput.type = 'hidden';
-                idInput.name = 'student_id';
-                idInput.value = studentId;
-                
-                form.appendChild(actionInput);
-                form.appendChild(idInput);
-                document.body.appendChild(form);
-                form.submit();
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    hideLoading();
+                    
+                    if (data.success) {
+                        showNotification('Student graduated successfully!', 'success');
+                        setTimeout(() => {
+                            reloadTableData('students');
+                        }, 500);
+                    } else {
+                        // Show detailed error modal
+                        showEligibilityErrorModal('Graduation', data);
+                    }
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Error:', error);
+                    showNotification('Network error. Please try again.', 'error');
+                });
+            }
+        }
+
+        // Show detailed eligibility error modal
+        function showEligibilityErrorModal(actionType, data) {
+            const details = data.details || {};
+            const failedSubjects = details.failed_subjects || [];
+            
+            let failedSubjectsHTML = '';
+            if (failedSubjects.length > 0) {
+                failedSubjectsHTML = `
+                    <div style="margin-top: 1rem; padding: 1rem; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px;">
+                        <div style="font-weight: 600; color: #991b1b; margin-bottom: 0.5rem;">❌ Failed Subjects (Mark < 50):</div>
+                        <ul style="list-style: none; padding: 0; margin: 0;">
+                            ${failedSubjects.map(s => `
+                                <li style="padding: 0.5rem 0; border-bottom: 1px solid #fca5a5;">
+                                    <div style="display: flex; justify-content: space-between;">
+                                        <span style="font-weight: 500;">${s.subject}</span>
+                                        <span style="color: #dc2626; font-weight: 600;">${s.mark}/100</span>
+                                    </div>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+            
+            let requirementsHTML = '';
+            if (details.reasons && details.reasons.length > 0) {
+                requirementsHTML = `
+                    <div style="margin-top: 1rem; padding: 1rem; background: #fffbeb; border: 1px solid #fcd34d; border-radius: 6px;">
+                        <div style="font-weight: 600; color: #92400e; margin-bottom: 0.5rem;">📋 Requirements:</div>
+                        <ul style="margin: 0; padding-left: 1.5rem;">
+                            ${details.reasons.map(r => `<li style="color: #78350f; margin: 0.3rem 0;">${r}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+            
+            const modalHTML = `
+                <div id="eligibilityErrorModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 100000; display: flex; align-items: center; justify-content: center; animation: fadeIn 0.2s ease;">
+                    <div style="background: white; padding: 2rem; border-radius: 16px; width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3); animation: slideUp 0.3s ease;">
+                        <div style="text-align: center; margin-bottom: 1.5rem;">
+                            <div style="font-size: 4rem; margin-bottom: 0.5rem;">⚠️</div>
+                            <h3 style="margin: 0; color: #dc2626; font-size: 1.5rem; font-weight: 700;">Cannot ${actionType === 'Promotion' ? 'Promote' : 'Graduate'} Student</h3>
+                        </div>
+                        
+                        <div style="background: #fee2e2; padding: 1rem; border-radius: 8px; border-left: 4px solid #dc2626; margin-bottom: 1rem;">
+                            <p style="margin: 0; color: #7f1d1d; font-weight: 500;">${data.message}</p>
+                        </div>
+                        
+                        ${requirementsHTML}
+                        ${failedSubjectsHTML}
+                        
+                        <div style="margin-top: 1.5rem; padding: 1rem; background: #dbeafe; border-radius: 8px;">
+                            <div style="font-weight: 600; color: #1e40af; margin-bottom: 0.5rem;">💡 What to do:</div>
+                            <ul style="margin: 0; padding-left: 1.5rem; color: #1e3a8a;">
+                                ${failedSubjects.length > 0 ? '<li>Update failed subjects to have marks ≥ 50</li>' : ''}
+                                ${details.total_final_grade < details.required_grade ? '<li>Increase marks to reach minimum final grade of 25</li>' : ''}
+                                <li>Review all subject marks before trying again</li>
+                            </ul>
+                        </div>
+                        
+                        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+                            <button onclick="closeEligibilityErrorModal()" 
+                                    style="padding: 0.75rem 2rem; border: none; background: #3b82f6; color: white; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 600;">
+                                OK, I Understand
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+            
+            // Add click outside to close
+            const modal = document.getElementById('eligibilityErrorModal');
+            modal.addEventListener('click', function(e) {
+                if (e.target === modal) {
+                    closeEligibilityErrorModal();
+                }
+            });
+            
+            // Add ESC and Enter key to close
+            const keyHandler = function(e) {
+                if (e.key === 'Escape' || e.key === 'Enter') {
+                    closeEligibilityErrorModal();
+                    document.removeEventListener('keydown', keyHandler);
+                }
+            };
+            document.addEventListener('keydown', keyHandler);
+            
+            // Store key handler reference for cleanup
+            modal.dataset.keyHandler = 'attached';
+        }
+        
+        function closeEligibilityErrorModal() {
+            const modal = document.getElementById('eligibilityErrorModal');
+            if (modal) {
+                modal.style.animation = 'fadeOut 0.2s ease';
+                setTimeout(() => modal.remove(), 200);
             }
         }
 
@@ -5720,7 +6923,7 @@ if ($page == 'reports') {
                 <div id="editModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
                     <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto;">
                         <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Poppins', sans-serif;">✏️ Edit Student</h3>
-                        <form id="editStudentForm" method="POST" action="" onsubmit="event.preventDefault(); submitFormAjax(this, function(){ closeEditModal(); location.reload(); });">
+                        <form id="editStudentForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'students', function(){ closeEditModal(); });">
                             <input type="hidden" name="action" value="update_student">
                             <input type="hidden" name="student_id" value="${student.id}">
                             
@@ -5868,25 +7071,29 @@ if ($page == 'reports') {
 
         function deleteSubject(subjectId) {
             if (confirm('Are you sure you want to delete this subject? This will also remove all marks for this subject.')) {
-                // Create a form and submit it
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.style.display = 'none';
+                showLoading('Deleting Subject', 'Please wait...');
                 
-                const actionInput = document.createElement('input');
-                actionInput.type = 'hidden';
-                actionInput.name = 'action';
-                actionInput.value = 'delete_subject';
+                const formData = new FormData();
+                formData.append('action', 'delete_subject');
+                formData.append('subject_id', subjectId);
                 
-                const idInput = document.createElement('input');
-                idInput.type = 'hidden';
-                idInput.name = 'subject_id';
-                idInput.value = subjectId;
-                
-                form.appendChild(actionInput);
-                form.appendChild(idInput);
-                document.body.appendChild(form);
-                form.submit();
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.text())
+                .then(data => {
+                    hideLoading();
+                    showNotification('Subject deleted successfully!', 'success');
+                    setTimeout(() => {
+                        reloadTableData('subjects');
+                    }, 500);
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Error:', error);
+                    showNotification('Error deleting subject', 'error');
+                });
             }
         }
 
@@ -5896,7 +7103,7 @@ if ($page == 'reports') {
                 <div id="editSubjectModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
                     <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto;">
                         <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Poppins', sans-serif;">✏️ Edit Subject</h3>
-                        <form id="editSubjectForm" method="POST" action="" onsubmit="event.preventDefault(); submitFormAjax(this, function(){ closeEditSubjectModal(); location.reload(); });">
+                        <form id="editSubjectForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'subjects', function(){ closeEditSubjectModal(); });">
                             <input type="hidden" name="action" value="update_subject">
                             <input type="hidden" name="subject_id" value="${subject.id}">
                             
@@ -5978,25 +7185,29 @@ if ($page == 'reports') {
 
         function deleteMark(markId) {
             if (confirm('Are you sure you want to delete this mark?')) {
-                // Create a form and submit it
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.style.display = 'none';
+                showLoading('Deleting Mark', 'Please wait...');
                 
-                const actionInput = document.createElement('input');
-                actionInput.type = 'hidden';
-                actionInput.name = 'action';
-                actionInput.value = 'delete_mark';
+                const formData = new FormData();
+                formData.append('action', 'delete_mark');
+                formData.append('mark_id', markId);
                 
-                const idInput = document.createElement('input');
-                idInput.type = 'hidden';
-                idInput.name = 'mark_id';
-                idInput.value = markId;
-                
-                form.appendChild(actionInput);
-                form.appendChild(idInput);
-                document.body.appendChild(form);
-                form.submit();
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.text())
+                .then(data => {
+                    hideLoading();
+                    showNotification('Mark deleted successfully!', 'success');
+                    setTimeout(() => {
+                        reloadTableData('marks');
+                    }, 500);
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Error:', error);
+                    showNotification('Error deleting mark', 'error');
+                });
             }
         }
 
@@ -6013,7 +7224,7 @@ if ($page == 'reports') {
                 <div id="editMarkModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
                     <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto;">
                         <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Poppins', sans-serif;">✏️ Edit Mark</h3>
-                        <form id="editMarkForm" method="POST" action="" onsubmit="event.preventDefault(); submitFormAjax(this, function(){ closeEditMarkModal(); location.reload(); });">
+                        <form id="editMarkForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'marks', function(){ closeEditMarkModal(); });">
                             <input type="hidden" name="action" value="update_mark_record">
                             <input type="hidden" name="mark_id" value="${mark.id}">
                             
@@ -6155,56 +7366,42 @@ if ($page == 'reports') {
         function filterMarks() {
             const searchValue = document.getElementById('searchMarks').value.toLowerCase();
             const yearFilter = document.getElementById('filterMarksYear').value;
-            const studentStatusFilter = document.getElementById('filterStudentStatus').value;
             const classFilter = document.getElementById('filterMarksClass').value;
-            const subjectFilter = document.getElementById('filterSubject').value.toLowerCase();
-            const gradeFilter = document.getElementById('filterGrade').value;
-            const statusFilter = document.getElementById('filterStatus').value;
             
             const table = document.getElementById('marksTable');
-            const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+            const rows = table.querySelectorAll('tbody tr.student-main-row');
             
             let visibleCount = 0;
             
-            for (let i = 0; i < rows.length; i++) {
-                const row = rows[i];
-                const cells = row.getElementsByTagName('td');
+            rows.forEach(row => {
+                const studentId = row.getAttribute('data-student-id');
+                const detailsRow = document.getElementById('details-' + studentId);
                 
-                if (cells.length === 0) continue; // Skip header or empty rows
+                const cells = row.querySelectorAll('td');
+                
+                if (cells.length === 0) return; // Skip empty rows
                 
                 const studentName = cells[0].textContent.toLowerCase();
-                const yearText = cells[1].textContent.toLowerCase();
-                const classText = cells[2].textContent.toLowerCase();
-                const studentStatusText = cells[3].textContent.toLowerCase();
-                const subjectName = cells[4].textContent.toLowerCase();
-                const grade = cells[10].textContent.trim();
-                const status = cells[11].textContent.trim();
                 
-                // Get year, class, and student status from data attributes
+                // Get year and class from data attributes
                 const rowYear = row.getAttribute('data-year');
-                const rowStudentStatus = row.getAttribute('data-student-status');
                 const rowClass = row.getAttribute('data-class');
                 
                 // Check search criteria
-                const matchesSearch = searchValue === '' || 
-                    studentName.includes(searchValue) || 
-                    subjectName.includes(searchValue);
-                
+                const matchesSearch = searchValue === '' || studentName.includes(searchValue);
                 const matchesYear = yearFilter === '' || rowYear === yearFilter;
-                const matchesStudentStatus = studentStatusFilter === '' || rowStudentStatus === studentStatusFilter;
                 const matchesClass = classFilter === '' || rowClass === classFilter;
-                const matchesSubject = subjectFilter === '' || subjectName.includes(subjectFilter);
-                const matchesGrade = gradeFilter === '' || grade === gradeFilter;
-                const matchesStatus = statusFilter === '' || status === statusFilter;
                 
                 // Show/hide row based on all criteria
-                if (matchesSearch && matchesYear && matchesStudentStatus && matchesClass && matchesSubject && matchesGrade && matchesStatus) {
+                if (matchesSearch && matchesYear && matchesClass) {
                     row.style.display = '';
+                    if (detailsRow) detailsRow.style.display = '';
                     visibleCount++;
                 } else {
                     row.style.display = 'none';
+                    if (detailsRow) detailsRow.style.display = 'none';
                 }
-            }
+            });
             
             // Update results counter
             updateMarksCounter(visibleCount);
@@ -6213,54 +7410,9 @@ if ($page == 'reports') {
         function clearMarksFilters() {
             document.getElementById('searchMarks').value = '';
             document.getElementById('filterMarksYear').value = '';
-            document.getElementById('filterStudentStatus').value = '';
             document.getElementById('filterMarksClass').value = '';
-            document.getElementById('filterSubject').value = '';
-            document.getElementById('filterGrade').value = '';
-            document.getElementById('filterStatus').value = '';
             
-            // Also update the subject filter when clearing
-            updateMarksSubjectFilter();
             filterMarks();
-        }
-
-        // Function to update the subject filter based on selected year
-        function updateMarksSubjectFilter() {
-            const selectedYear = document.getElementById('filterMarksYear').value;
-            const subjectFilter = document.getElementById('filterSubject');
-            
-            // Clear current options
-            subjectFilter.innerHTML = '<option value="" data-translate="all_subjects">All Subjects</option>';
-            
-            if (selectedYear === '') {
-                // If no year selected, show all subjects
-                <?php
-                $all_filter_subjects = pg_query($conn, "SELECT id, subject_name, year FROM subjects ORDER BY subject_name");
-                echo "const allFilterSubjects = " . json_encode(pg_fetch_all($all_filter_subjects)) . ";\n";
-                ?>
-                
-                allFilterSubjects.forEach(subject => {
-                    const option = document.createElement('option');
-                    option.value = subject.subject_name.toLowerCase();
-                    option.textContent = subject.subject_name;
-                    subjectFilter.appendChild(option);
-                });
-            } else {
-                // Show only subjects for the selected year
-                <?php
-                $year_filter_subjects = pg_query($conn, "SELECT id, subject_name, year FROM subjects ORDER BY subject_name");
-                echo "const yearFilterSubjects = " . json_encode(pg_fetch_all($year_filter_subjects)) . ";\n";
-                ?>
-                
-                yearFilterSubjects.forEach(subject => {
-                    if (subject.year == selectedYear) {
-                        const option = document.createElement('option');
-                        option.value = subject.subject_name.toLowerCase();
-                        option.textContent = subject.subject_name;
-                        subjectFilter.appendChild(option);
-                    }
-                });
-            }
         }
 
         // Function to limit input values to min/max range
@@ -6407,22 +7559,23 @@ if ($page == 'reports') {
         // Reports filtering and search functions
         function filterReportsTable() {
             const searchValue = document.getElementById('reportsSearchStudent').value.toLowerCase();
-            const classFilter = document.getElementById('reportsFilterClass').value;
-            const subjectFilter = document.getElementById('reportsFilterSubject').value;
-            const gradeFilter = document.getElementById('reportsFilterGrade').value;
+            const yearFilter = document.getElementById('reportsFilterYear')?.value || '';
+            const classFilter = document.getElementById('reportsFilterClass')?.value || '';
             
             const table = document.getElementById('reportsTable');
-            const rows = table.querySelectorAll('tbody tr');
+            const rows = table.querySelectorAll('tbody tr.student-main-row');
             let visibleCount = 0;
 
             rows.forEach(row => {
+                const studentId = row.getAttribute('data-student-id');
+                const detailsRow = document.getElementById('details-' + studentId);
+                
                 const cells = row.querySelectorAll('td');
                 if (cells.length === 0) return; // Skip empty rows
                 
                 const studentName = cells[0].textContent.toLowerCase();
-                const classLevel = cells[1].textContent;
-                const subject = cells[2].textContent;
-                const grade = cells[8].textContent.trim();
+                const yearText = cells[1].textContent;
+                const classLevel = cells[2].textContent.trim();
                 
                 let matches = true;
                 
@@ -6431,26 +7584,26 @@ if ($page == 'reports') {
                     matches = false;
                 }
                 
+                // Year filter
+                if (yearFilter) {
+                    const studentYear = yearText.includes('Year 1') ? '1' : '2';
+                    if (studentYear !== yearFilter) {
+                        matches = false;
+                    }
+                }
+                
                 // Class filter
                 if (classFilter && classLevel !== classFilter) {
                     matches = false;
                 }
                 
-                // Subject filter
-                if (subjectFilter && subject !== subjectFilter) {
-                    matches = false;
-                }
-                
-                // Grade filter
-                if (gradeFilter && grade !== gradeFilter) {
-                    matches = false;
-                }
-                
                 if (matches) {
                     row.style.display = '';
+                    if (detailsRow) detailsRow.style.display = '';
                     visibleCount++;
                 } else {
                     row.style.display = 'none';
+                    if (detailsRow) detailsRow.style.display = 'none';
                 }
             });
             
@@ -6460,9 +7613,12 @@ if ($page == 'reports') {
 
         function clearReportsFilters() {
             document.getElementById('reportsSearchStudent').value = '';
-            document.getElementById('reportsFilterClass').value = '';
-            document.getElementById('reportsFilterSubject').value = '';
-            document.getElementById('reportsFilterGrade').value = '';
+            if (document.getElementById('reportsFilterYear')) {
+                document.getElementById('reportsFilterYear').value = '';
+            }
+            if (document.getElementById('reportsFilterClass')) {
+                document.getElementById('reportsFilterClass').value = '';
+            }
             filterReportsTable();
         }
 
@@ -6477,8 +7633,8 @@ if ($page == 'reports') {
                 tableContainer.appendChild(counter);
             }
             
-            const total = document.querySelectorAll('#reportsTable tbody tr').length;
-            counter.textContent = `Showing ${count} of ${total} reports`;
+            const total = document.querySelectorAll('#reportsTable tbody tr.student-main-row').length;
+            counter.textContent = `Showing ${count} of ${total} students`;
         }
 
         function updateMarksCounter(count) {
@@ -6492,18 +7648,16 @@ if ($page == 'reports') {
                 tableContainer.appendChild(counter);
             }
             
-            const total = document.querySelectorAll('#marksTable tbody tr').length;
-            counter.textContent = `Showing ${count} of ${total} marks`;
+            const total = document.querySelectorAll('#marksTable tbody tr.student-main-row').length;
+            counter.textContent = `Showing ${count} of ${total} students`;
         }
 
         // Initialize marks counter on page load
         document.addEventListener('DOMContentLoaded', function() {
             if (document.getElementById('marksTable')) {
                 setTimeout(() => {
-                    const totalRows = document.querySelectorAll('#marksTable tbody tr').length;
+                    const totalRows = document.querySelectorAll('#marksTable tbody tr.student-main-row').length;
                     updateMarksCounter(totalRows);
-                    // Initialize the subject filter
-                    updateMarksSubjectFilter();
                 }, 100);
             }
             
@@ -6516,7 +7670,7 @@ if ($page == 'reports') {
             
             if (document.getElementById('reportsTable')) {
                 setTimeout(() => {
-                    const totalRows = document.querySelectorAll('#reportsTable tbody tr').length;
+                    const totalRows = document.querySelectorAll('#reportsTable tbody tr.student-main-row').length;
                     updateReportsCounter(totalRows);
                 }, 100);
             }
@@ -7809,12 +8963,20 @@ if ($page == 'reports') {
             formData.append('student_id', studentId);
             
             let confirmMessage = '';
-            if (action === 'delete_student') confirmMessage = 'Are you sure you want to delete this student?';
-            else if (action === 'graduate_student') confirmMessage = 'Are you sure you want to graduate this student?';
+            let loadingMessage = '';
+            if (action === 'delete_student') {
+                confirmMessage = 'Are you sure you want to delete this student?';
+                loadingMessage = 'Deleting Student';
+            } else if (action === 'graduate_student') {
+                confirmMessage = 'Are you sure you want to graduate this student?';
+                loadingMessage = 'Graduating Student';
+            }
             
             if (confirmMessage && !confirm(confirmMessage)) {
                 return;
             }
+            
+            showLoading(loadingMessage, 'Please wait...');
             
             fetch('', {
                 method: 'POST',
@@ -7822,46 +8984,68 @@ if ($page == 'reports') {
             })
             .then(response => response.text())
             .then(data => {
+                hideLoading();
                 if (data.includes('successfully')) {
                     let message = 'Operation completed successfully';
                     if (data.includes('deleted successfully')) message = 'Student deleted successfully!';
                     else if (data.includes('promoted successfully')) message = 'Student promoted successfully!';
                     else if (data.includes('graduated successfully')) message = 'Student graduated successfully!';
                     
-                    showSuccessMessage(message);
-                    
-                    // Remove the student row from the table
-                    const studentButton = document.querySelector(`button[onclick*="handleStudentAction('delete_student', ${studentId})"]`);
-                    if (studentButton) {
-                        const studentRow = studentButton.closest('tr');
-                        if (studentRow) {
-                            studentRow.style.animation = 'fadeOut 0.3s ease';
-                            setTimeout(() => studentRow.remove(), 300);
-                        }
-                    }
+                    showNotification(message, 'success');
+                    setTimeout(() => {
+                        reloadTableData('students');
+                    }, 500);
                 } else {
-                    showErrorMessage('An error occurred. Please try again.');
+                    showNotification('An error occurred. Please try again.', 'error');
                 }
             })
             .catch(error => {
+                hideLoading();
                 console.error('Error:', error);
-                showErrorMessage('Network error. Please try again.');
+                showNotification('Network error. Please try again.', 'error');
             });
         }
 
         function showPromotionDialog(studentId) {
-            // First, get available Year 2 subjects
+            // First, check if student is eligible for promotion
+            showLoading('Checking Eligibility', 'Validating student records...');
+            
+            const checkFormData = new FormData();
+            checkFormData.append('action', 'check_promotion_eligibility');
+            checkFormData.append('student_id', studentId);
+            
             fetch('', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `action=get_year2_subjects`
+                body: checkFormData
             })
             .then(response => response.json())
+            .then(eligibility => {
+                hideLoading();
+                
+                if (!eligibility.eligible) {
+                    // Show error modal if not eligible
+                    showEligibilityErrorModal('Promotion', eligibility);
+                    return;
+                }
+                
+                // Student is eligible, now get Year 2 subjects
+                return fetch('', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `action=get_year2_subjects`
+                });
+            })
+            .then(response => {
+                if (!response) return; // Stopped due to ineligibility
+                return response.json();
+            })
             .then(subjects => {
+                if (!subjects) return; // Stopped due to ineligibility
+                
                 if (subjects.error) {
-                    showErrorMessage(subjects.error);
+                    showNotification(subjects.error, 'error');
                     return;
                 }
                 
@@ -7895,9 +9079,9 @@ if ($page == 'reports') {
                         </div>
                         <div style="padding: 1.5rem;">
                             <div style="background: #F0FDF4; padding: 1rem; border-radius: 6px; border-left: 4px solid #059669; margin-bottom: 1.5rem;">
-                                <h4 style="margin: 0 0 0.5rem 0; color: #059669;">🎯 Promotion Process</h4>
+                                <h4 style="margin: 0 0 0.5rem 0; color: #059669;">✅ Student Eligible for Promotion</h4>
                                 <p style="margin: 0; font-size: 0.9rem; color: #065F46;">
-                                    The student's Year 1 grades will be preserved. Select which Year 2 subjects they should be enrolled in.
+                                    All requirements met! Select Year 2 subjects to enroll.
                                 </p>
                             </div>
                             
@@ -7952,6 +9136,7 @@ if ($page == 'reports') {
             }
             
             // Execute promotion with selected subjects
+            showLoading('Promoting Student', 'Moving to Year 2...');
             const formData = new FormData();
             formData.append('action', 'promote_student_with_subjects');
             formData.append('student_id', studentId);
@@ -7961,22 +9146,30 @@ if ($page == 'reports') {
                 method: 'POST',
                 body: formData
             })
-            .then(response => response.text())
+            .then(response => response.json())
             .then(data => {
                 modal.remove();
+                hideLoading();
                 
-                if (data.includes('successfully')) {
-                    showSuccessMessage('Student promoted to Year 2 successfully!');
-                    // Refresh the page to show updated student data
-                    setTimeout(() => window.location.reload(), 1500);
+                if (data.success) {
+                    showNotification('Student promoted to Year 2!', 'success');
+                    setTimeout(() => {
+                        reloadTableData('students');
+                    }, 500);
                 } else {
-                    showErrorMessage('Error promoting student. Please try again.');
+                    // Show detailed error modal
+                    if (data.details) {
+                        showEligibilityErrorModal('Promotion', data);
+                    } else {
+                        showNotification(data.message || 'Error promoting student', 'error');
+                    }
                 }
             })
             .catch(error => {
+                hideLoading();
                 console.error('Error:', error);
                 modal.remove();
-                showErrorMessage('Network error. Please try again.');
+                showNotification('Network error. Please try again.', 'error');
             });
         }
 
@@ -8028,13 +9221,15 @@ if ($page == 'reports') {
         }
 
         function handleMarkAction(action, markId) {
-            const formData = new FormData();
-            formData.append('action', action);
-            formData.append('mark_id', markId);
-            
             if (action === 'delete_mark' && !confirm('Are you sure you want to delete this mark?')) {
                 return;
             }
+            
+            showLoading('Processing', 'Please wait...');
+            
+            const formData = new FormData();
+            formData.append('action', action);
+            formData.append('mark_id', markId);
             
             fetch('', {
                 method: 'POST',
@@ -8042,29 +9237,20 @@ if ($page == 'reports') {
             })
             .then(response => response.text())
             .then(data => {
-                if (data.includes('successfully')) {
-                    showSuccessMessage('Mark deleted successfully!');
-                    
-                    // Remove the mark row from the table
-                    let markButton = document.querySelector(`button[onclick*="handleMarkAction('delete_mark', ${markId})"]`);
-                    if (!markButton) {
-                        // Fallback: try old selector format
-                        markButton = document.querySelector(`button[onclick*="deleteMark(${markId})"]`);
-                    }
-                    if (markButton) {
-                        const markRow = markButton.closest('tr');
-                        if (markRow) {
-                            markRow.style.animation = 'fadeOut 0.3s ease';
-                            setTimeout(() => markRow.remove(), 300);
-                        }
-                    }
+                hideLoading();
+                if (data.includes('successfully') || data.includes('Success')) {
+                    showNotification('Mark deleted successfully!', 'success');
+                    setTimeout(() => {
+                        reloadTableData('marks');
+                    }, 500);
                 } else {
-                    showErrorMessage('An error occurred. Please try again.');
+                    showNotification('An error occurred. Please try again.', 'error');
                 }
             })
             .catch(error => {
+                hideLoading();
                 console.error('Error:', error);
-                showErrorMessage('Network error. Please try again.');
+                showNotification('Network error. Please try again.', 'error');
             });
         }
 
