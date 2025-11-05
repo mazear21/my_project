@@ -570,19 +570,28 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_mark') {
     $mark_id = (int)$_POST['mark_id'];
     
     if ($mark_id > 0) {
-        $delete_query = "DELETE FROM marks WHERE id = $1";
-        $result = pg_query_params($conn, $delete_query, array($mark_id));
+        // Instead of deleting, reset all marks to 0
+        $reset_query = "UPDATE marks 
+                        SET final_exam = 0, 
+                            midterm_exam = 0, 
+                            quizzes = 0, 
+                            daily_activities = 0, 
+                            mark = 0, 
+                            final_grade = 0, 
+                            status = 'Fail'
+                        WHERE id = $1";
+        $result = pg_query_params($conn, $reset_query, array($mark_id));
         
         if ($result) {
-            // Resequence IDs after deletion
-            resequenceTable($conn, 'marks');
-            header("Location: ?page=marks&success=" . urlencode("Mark deleted successfully!"));
+            echo "Mark reset successfully!";
             exit;
         } else {
-            $error_message = "Error deleting mark: " . pg_last_error($conn);
+            echo "Error resetting mark: " . pg_last_error($conn);
+            exit;
         }
     } else {
-        $error_message = "Invalid mark ID.";
+        echo "Invalid mark ID.";
+        exit;
     }
 }
 
@@ -1304,13 +1313,36 @@ function getKPIs($conn, $filter_year = null) {
     $total_subjects = pg_query($conn, "SELECT COUNT(*) as count FROM subjects" . ($filter_year ? " WHERE year = $filter_year" : ""));
     $total_subjects_count = pg_fetch_assoc($total_subjects)['count'];
     
-    $avg_score = pg_query($conn, "
-        SELECT ROUND(AVG(m.mark), 1) as avg 
-        FROM marks m 
-        JOIN students s ON m.student_id = s.id 
-        WHERE m.mark > 0 AND s.status = 'active' $year_filter_marks
-    ");
-    $avg_score_value = pg_fetch_assoc($avg_score)['avg'] ?? 0;
+    // Initialize top_year variable
+    $top_year = null;
+    
+    // Calculate average score - if "All Years" selected, show highest year average
+    if ($filter_year) {
+        // Specific year selected - show that year's average
+        $avg_score = pg_query($conn, "
+            SELECT ROUND(AVG(m.mark), 1) as avg 
+            FROM marks m 
+            JOIN students s ON m.student_id = s.id 
+            WHERE m.mark > 0 AND s.status = 'active' $year_filter_marks
+        ");
+        $avg_score_value = pg_fetch_assoc($avg_score)['avg'] ?? 0;
+    } else {
+        // All years - show highest average between Year 1 and Year 2
+        $year_averages = pg_query($conn, "
+            SELECT 
+                s.year,
+                ROUND(AVG(m.mark), 1) as avg_mark
+            FROM marks m 
+            JOIN students s ON m.student_id = s.id 
+            WHERE m.mark > 0 AND s.status = 'active'
+            GROUP BY s.year
+            ORDER BY avg_mark DESC
+            LIMIT 1
+        ");
+        $year_avg_data = pg_fetch_assoc($year_averages);
+        $avg_score_value = $year_avg_data['avg_mark'] ?? 0;
+        $top_year = $year_avg_data['year'] ?? null;
+    }
     
     // Calculate top performing class based on pass rate and high grades
     $top_class = pg_query($conn, "
@@ -1406,6 +1438,7 @@ function getKPIs($conn, $filter_year = null) {
         'graduated_students' => $graduated_count,
         'total_subjects' => $total_subjects_count,
         'avg_score' => $avg_score_value,
+        'top_year' => $top_year,
         'top_class' => $top_class_data['class_level'] ?? 'N/A',
         'top_class_display' => formatClassDisplay($top_class_data['class_level'] ?? 'N/A'),
         'top_class_score' => $top_class_data['performance_score'] ?? 0,
@@ -1426,13 +1459,13 @@ function formatClassDisplay($class_level) {
 }
 
 function generateChartData($conn) {
-    // Get grade distribution data using the new function for Year 1 (default)
-    $gradeDistData = getGradeDistributionData($conn, 1);
+    // Get grade distribution data - no default filter, show all years
+    $gradeDistData = getGradeDistributionData($conn, null);
     $grades = $gradeDistData['labels'];
     $grade_counts = $gradeDistData['data'];
     
     return [
-        'kpis' => getKPIs($conn, 1), // Load Year 1 KPIs by default
+        'kpis' => getKPIs($conn, null), // Load all years KPIs by default
         'grades' => $grades,
         'grade_counts' => $grade_counts,
         'student_distribution' => getStudentDistributionData($conn, 'overview')
@@ -2004,8 +2037,12 @@ if ($page == 'reports') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Premium Student Management System</title>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Professional Fonts for English, Arabic, and Kurdish -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;600;700&family=Noto+Sans:wght@300;400;500;600;700&family=Noto+Sans+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://unpkg.com/aos@2.3.1/dist/aos.css" rel="stylesheet">
     <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -2047,7 +2084,7 @@ if ($page == 'reports') {
         }
 
         body {
-            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-family: 'Roboto', 'Segoe UI', 'Noto Sans Arabic', 'Noto Sans', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg-color);
             min-height: 100vh;
             color: var(--text-color);
@@ -2065,13 +2102,14 @@ if ($page == 'reports') {
         }
 
         .nav-container {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 0 2rem;
+            padding: 0 1.5rem;
             min-height: 70px;
+            gap: 3rem;
         }
 
         .nav-links {
@@ -2082,6 +2120,8 @@ if ($page == 'reports') {
             border-radius: 15px;
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.2);
+            margin-left: auto;
+            margin-right: 1rem;
         }
 
         .nav-container a {
@@ -2140,15 +2180,16 @@ if ($page == 'reports') {
             display: flex;
             gap: 0.5rem;
             align-items: center;
+            margin-left: 1.5rem;
         }
 
         .language-switcher select {
             background: linear-gradient(45deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.1));
             color: white;
             border: 2px solid rgba(255, 255, 255, 0.3);
-            padding: 10px 16px;
+            padding: 11px 18px;
             border-radius: 12px;
-            font-family: 'Poppins', sans-serif;
+            font-family: 'Roboto', 'Noto Sans', sans-serif;
             font-size: 13px;
             font-weight: 600;
             cursor: pointer;
@@ -2156,6 +2197,7 @@ if ($page == 'reports') {
             backdrop-filter: blur(10px);
             text-transform: uppercase;
             letter-spacing: 1px;
+            min-width: 65px;
         }
 
         .language-switcher select:hover {
@@ -2183,16 +2225,17 @@ if ($page == 'reports') {
         .nav-brand {
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 15px;
             color: white;
+            margin-right: auto;
         }
 
         .brand-icon {
-            font-size: 32px;
+            font-size: 36px;
             background: linear-gradient(45deg, #fbbf24, #f59e0b);
-            width: 50px;
-            height: 50px;
-            border-radius: 12px;
+            width: 55px;
+            height: 55px;
+            border-radius: 14px;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -2203,23 +2246,25 @@ if ($page == 'reports') {
         .brand-text {
             display: flex;
             flex-direction: column;
-            gap: 2px;
+            gap: 3px;
         }
 
         .brand-title {
-            font-size: 18px;
+            font-size: 20px;
             font-weight: 700;
             color: white;
             letter-spacing: 0.5px;
             text-transform: uppercase;
+            line-height: 1.2;
         }
 
         .brand-subtitle {
-            font-size: 12px;
+            font-size: 13px;
             color: #fbbf24;
             font-weight: 500;
             letter-spacing: 1px;
             text-transform: uppercase;
+            line-height: 1;
         }
 
         /* Responsive navbar adjustments */
@@ -2277,10 +2322,12 @@ if ($page == 'reports') {
         .dashboard-header {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 3rem 2rem;
+            padding: 2.5rem 2rem;
             text-align: center;
             position: relative;
             overflow: hidden;
+            border-radius: 0;
+            margin: 0;
         }
 
         .dashboard-header::before {
@@ -2295,19 +2342,38 @@ if ($page == 'reports') {
         }
 
         .dashboard-header h1 {
-            font-size: 3rem;
+            font-size: 2.5rem;
             font-weight: 700;
             margin-bottom: 0.5rem;
             position: relative;
             z-index: 2;
+            min-height: 3rem;
+            line-height: 1.2;
         }
 
         .dashboard-subtitle {
-            font-size: 1.2rem;
+            font-size: 1.1rem;
             opacity: 0.9;
             font-weight: 300;
             position: relative;
             z-index: 2;
+            min-height: 1.4rem;
+            line-height: 1.3;
+        }
+        
+        /* Blur text animation segments */
+        .blur-text-segment {
+            display: inline-block;
+            will-change: transform, filter, opacity;
+            backface-visibility: hidden;
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+        }
+        
+        /* RTL support for Arabic/Kurdish */
+        [dir="rtl"] .blur-text-segment,
+        .blur-text-segment[dir="rtl"] {
+            unicode-bidi: embed;
         }
 
         /* ===== REPORTS MAIN CONTENT ===== */
@@ -2511,7 +2577,7 @@ if ($page == 'reports') {
             padding: 0.75rem;
             border: 2px solid var(--border-color);
             border-radius: 8px;
-            font-family: 'Poppins', sans-serif;
+            font-family: 'Roboto', 'Noto Sans', sans-serif;
             font-size: 0.9rem;
             background: var(--card-bg);
             color: var(--text-color);
@@ -2528,7 +2594,7 @@ if ($page == 'reports') {
             padding: 0.75rem 1.5rem;
             border: none;
             border-radius: 8px;
-            font-family: 'Poppins', sans-serif;
+            font-family: 'Roboto', 'Noto Sans', sans-serif;
             font-weight: 500;
             cursor: pointer;
             transition: var(--transition);
@@ -2903,7 +2969,7 @@ if ($page == 'reports') {
             color: var(--text-color);
             cursor: pointer;
             transition: var(--transition);
-            font-family: 'Poppins', sans-serif;
+            font-family: 'Roboto', 'Noto Sans', sans-serif;
             font-size: 0.85rem;
             font-weight: 500;
         }
@@ -3214,13 +3280,13 @@ if ($page == 'reports') {
             font-weight: 600;
             color: #1e3a8a;
             margin-bottom: 0.5rem;
-            font-family: 'Poppins', sans-serif;
+            font-family: 'Roboto', 'Noto Sans', sans-serif;
         }
 
         .loading-subtext {
             font-size: 0.9rem;
             color: #64748b;
-            font-family: 'Poppins', sans-serif;
+            font-family: 'Roboto', 'Noto Sans', sans-serif;
         }
 
         .loading-dots {
@@ -3280,8 +3346,8 @@ if ($page == 'reports') {
             .container { padding: 1rem; }
             .nav-container { padding: 0 1rem; }
             .reports-main-content { padding: 1rem; }
-            .dashboard-header { padding: 2rem 1rem; }
-            .dashboard-header h1 { font-size: 2rem; }
+            .dashboard-header { padding: 1.5rem 1rem; }
+            .dashboard-header h1 { font-size: 1.8rem; }
             .charts-grid { grid-template-columns: 1fr; gap: 1rem; }
             .kpi-grid { grid-template-columns: 1fr; gap: 1rem; }
             .chart-card { padding: 1rem; margin: 0; }
@@ -3394,7 +3460,14 @@ if ($page == 'reports') {
                                 <div class="kpi-content">
                                     <div class="kpi-value"><?= $chartData['kpis']['avg_score'] ?? 0 ?>%</div>
                                     <div class="kpi-label" data-translate="average_score">Average Score</div>
-                                    <div class="kpi-trend positive" data-translate="overall_performance">Overall performance</div>
+                                    <div class="kpi-trend positive">
+                                        <?php if (isset($chartData['kpis']['top_year']) && $chartData['kpis']['top_year']): ?>
+                                            <span data-translate="top_performing_year">Top Performing Year</span>: 
+                                            <span data-translate="year">Year</span> <?= $chartData['kpis']['top_year'] ?>
+                                        <?php else: ?>
+                                            <span data-translate="overall_performance">Overall performance</span>
+                                        <?php endif; ?>
+                                    </div>
                                 </div>
                             </div>
                             
@@ -3463,7 +3536,9 @@ if ($page == 'reports') {
                             <!-- Subject Performance Chart - Year 1 -->
                             <div class="chart-card" data-aos="fade-up" data-aos-delay="100">
                                 <div class="chart-header">
-                                    <h3 class="chart-title">🎯 Subject Performance <span style="background: #3B82F6; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;">YEAR 1</span></h3>
+                                    <h3 class="chart-title">
+                                        <span data-translate="year">Year</span> 1 - <span data-translate="subject_performance">Subject Performance</span>
+                                    </h3>
                                     <div class="chart-actions">
                                         <button class="chart-expand-btn" onclick="expandChart('subjectChart1')">⛶</button>
                                     </div>
@@ -3476,7 +3551,9 @@ if ($page == 'reports') {
                             <!-- Top Performers Chart - Year 1 -->
                             <div class="chart-card" data-aos="fade-up" data-aos-delay="120">
                                 <div class="chart-header">
-                                    <h3 class="chart-title"> Top 3 Performers <span style="background: #3B82F6; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;">YEAR 1</span></h3>
+                                    <h3 class="chart-title">
+                                        <span data-translate="year">Year</span> 1 - 🏆 <span data-translate="top_performers">Top 3 Performers</span>
+                                    </h3>
                                     <div class="chart-actions">
                                         <button class="chart-expand-btn" onclick="expandChart('topPerformersChart1')">⛶</button>
                                     </div>
@@ -3489,7 +3566,9 @@ if ($page == 'reports') {
                             <!-- Subject Performance Chart - Year 2 -->
                             <div class="chart-card" data-aos="fade-up" data-aos-delay="140">
                                 <div class="chart-header">
-                                    <h3 class="chart-title"> Subject Performance <span style="background: #10B981; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;">YEAR 2</span></h3>
+                                    <h3 class="chart-title">
+                                        <span data-translate="year">Year</span> 2 - <span data-translate="subject_performance">Subject Performance</span>
+                                    </h3>
                                     <div class="chart-actions">
                                         <button class="chart-expand-btn" onclick="expandChart('subjectChart2')">⛶</button>
                                     </div>
@@ -3502,7 +3581,9 @@ if ($page == 'reports') {
                             <!-- Top Performers Chart - Year 2 -->
                             <div class="chart-card" data-aos="fade-up" data-aos-delay="160">
                                 <div class="chart-header">
-                                    <h3 class="chart-title"> Top 3 Performers <span style="background: #10B981; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;">YEAR 2</span></h3>
+                                    <h3 class="chart-title">
+                                        <span data-translate="year">Year</span> 2 - 🏆 <span data-translate="top_performers">Top 3 Performers</span>
+                                    </h3>
                                     <div class="chart-actions">
                                         <button class="chart-expand-btn" onclick="expandChart('topPerformersChart2')">⛶</button>
                                     </div>
@@ -3934,7 +4015,7 @@ if ($page == 'reports') {
                                 </div>
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="academic_year">Academic Year</label>
-                                    <select id="reportsFilterYear" class="premium-select" onchange="filterReportsTable()">
+                                    <select id="reportsFilterYear" class="premium-select" onchange="updateReportsSubjectFilter(); filterReportsTable()">
                                         <option value="" data-translate="all_years">All Years</option>
                                         <option value="1" data-translate="year_1">Year 1</option>
                                         <option value="2" data-translate="year_2">Year 2</option>
@@ -3956,6 +4037,21 @@ if ($page == 'reports') {
                                         ?>
                                     </select>
                                 </div>
+                                <div class="filter-section">
+                                    <label class="filter-label">Filter by Subject</label>
+                                    <select id="reportsFilterSubject" class="premium-select" onchange="filterReportsTable()">
+                                        <option value="">All Subjects</option>
+                                        <!-- Options will be populated dynamically -->
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label">Sort by Final Grade</label>
+                                    <select id="sortReportsByGrade" class="premium-select" onchange="filterReportsTable()">
+                                        <option value="">Default</option>
+                                        <option value="asc">Grade: Low to High</option>
+                                        <option value="desc">Grade: High to Low</option>
+                                    </select>
+                                </div>
                                 <button class="clear-filters-btn" onclick="clearReportsFilters()" data-translate="clear_filters">
                                     🔄 Clear Filters
                                 </button>
@@ -3967,6 +4063,7 @@ if ($page == 'reports') {
                             <div class="section-header">
                                 <h3 class="section-title">📋 Detailed Reports</h3>
                                 <div class="export-actions">
+                                    <button class="export-btn" onclick="collapseAllReports()" data-translate="collapse_all">📁 Collapse All</button>
                                     <button class="export-btn" onclick="exportData('csv')">📊 Export CSV</button>
                                     <button class="export-btn" onclick="printTable()" data-translate="print">🖨️ Print</button>
                                 </div>
@@ -3985,7 +4082,7 @@ if ($page == 'reports') {
                                     </thead>
                                     <tbody id="reportsTableBody">
                                         <?php
-                                        // Get all students with marks, grouped by student
+                                        // Get all students with marks, grouped by student (only active students)
                                         $students_query = "
                                             SELECT DISTINCT
                                                 s.id as student_id,
@@ -3994,6 +4091,7 @@ if ($page == 'reports') {
                                                 s.class_level
                                             FROM students s
                                             JOIN marks m ON s.id = m.student_id
+                                            WHERE s.status = 'active'
                                             ORDER BY s.name
                                         ";
                                         $students_result = pg_query($conn, $students_query);
@@ -4069,7 +4167,7 @@ if ($page == 'reports') {
                                                 <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
                                                              background: <?= $student['student_year'] == 1 ? '#dbeafe' : '#dcfce7' ?>; 
                                                              color: <?= $student['student_year'] == 1 ? '#1e40af' : '#166534' ?>;">
-                                                    Year <?= $student['student_year'] ?>
+                                                    <span data-translate="year">Year</span> <?= $student['student_year'] ?>
                                                 </span>
                                             </td>
                                             <td style="text-align: center;">
@@ -4079,14 +4177,17 @@ if ($page == 'reports') {
                                                 </span>
                                             </td>
                                             <td style="text-align: center;">
-                                                <span class="total-subjects-badge"><?= $total_subjects ?> subjects</span>
+                                                <span class="total-subjects-badge">
+                                                    <span><?= $total_subjects ?></span>
+                                                    <span data-translate="subjects">subjects</span>
+                                                </span>
                                             </td>
                                             <td style="text-align: center;">
                                                 <span class="final-grade-display"><?= number_format($total_grade, 2) ?></span>
                                             </td>
                                             <td style="text-align: center;" onclick="event.stopPropagation();">
-                                                <button class="manage-marks-btn" onclick="toggleStudentDetails(<?= $student_id ?>)">
-                                                    📋 View Details
+                                                <button class="manage-marks-btn" onclick="toggleStudentDetails(<?= $student_id ?>)" data-translate="view_details">
+                                                    View Details
                                                 </button>
                                             </td>
                                         </tr>
@@ -4095,17 +4196,17 @@ if ($page == 'reports') {
                                         <tr class="subject-details-row" id="details-<?= $student_id ?>">
                                             <td colspan="6">
                                                 <div class="subject-details-container">
-                                                    <div class="subject-title">📚 Subject Marks</div>
+                                                    <div class="subject-title"><span data-translate="subject_marks">Subject Marks</span></div>
                                                     <table class="subject-marks-table">
                                                         <thead>
                                                             <tr>
-                                                                <th>Subject</th>
-                                                                <th>Final (60)</th>
-                                                                <th>Midterm (20)</th>
-                                                                <th>Quiz (10)</th>
-                                                                <th>Daily (10)</th>
-                                                                <th>Total</th>
-                                                                <th>Grade</th>
+                                                                <th data-translate="subject">Subject</th>
+                                                                <th data-translate="final_exam">Final (60)</th>
+                                                                <th data-translate="midterm_exam">Midterm (20)</th>
+                                                                <th data-translate="quiz">Quiz (10)</th>
+                                                                <th data-translate="daily_activities">Daily (10)</th>
+                                                                <th data-translate="total">Total</th>
+                                                                <th data-translate="grade">Grade</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
@@ -4134,7 +4235,7 @@ if ($page == 'reports') {
                                                                 <!-- Year Total Row -->
                                                                 <tr style="background: linear-gradient(135deg, <?= $year == 1 ? '#dbeafe' : '#f3e8ff' ?> 0%, <?= $year == 1 ? '#bfdbfe' : '#e9d5ff' ?> 100%); font-weight: 600; border-top: 2px solid <?= $year == 1 ? '#3b82f6' : '#a855f7' ?>;">
                                                                     <td colspan="6" style="text-align: left; padding: 12px; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1rem;">
-                                                                        📊 Year <?= $year ?> Total Credits
+                                                                        <span data-translate="year">Year</span> <?= $year ?> <span data-translate="total_credits">Total Credits</span>
                                                                     </td>
                                                                     <td style="text-align: center; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1.1rem;">
                                                                         <strong><?= number_format($year_totals[$year], 2) ?></strong>
@@ -4238,6 +4339,16 @@ if ($page == 'reports') {
                                 <div class="filter-section" style="grid-column: span 2;">
                                     <label class="filter-label" data-translate="enroll_in_subjects">Enroll in Subjects</label>
                                     <div id="subjectEnrollmentContainer" style="background: white; border: 1px solid #ddd; border-radius: 8px; padding: 15px; max-height: 150px; overflow-y: auto;">
+                                        <!-- Select All Checkbox -->
+                                        <div id="selectAllSubjectsContainer" style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 2px solid #e5e7eb; display: none;">
+                                            <div style="display: flex; align-items: center; background: #f0f9ff; padding: 8px 12px; border-radius: 6px;">
+                                                <input type="checkbox" id="selectAllSubjects" style="margin-right: 10px; width: 18px; height: 18px; cursor: pointer;" onchange="toggleAllSubjects(this)">
+                                                <label for="selectAllSubjects" style="margin: 0; font-weight: 600; color: #0284c7; cursor: pointer; user-select: none;">
+                                                    <span data-translate="select_all_subjects">Select All Subjects</span>
+                                                </label>
+                                            </div>
+                                        </div>
+                                        
                                         <div class="no-subjects-message" style="color: #666; text-align: center; padding: 20px; font-style: italic;" data-translate="please_select_year_first">Please select an academic year first to see available subjects.</div>
                                         <?php
                                         $subjects_query = "SELECT id, subject_name, description, year FROM subjects ORDER BY year, subject_name";
@@ -4363,7 +4474,7 @@ if ($page == 'reports') {
                                         <th data-translate="gender">Gender</th>
                                         <th data-translate="class">Class</th>
                                         <th data-translate="academic_year">Year</th>
-                                        <th>Status</th>
+                                        <th data-translate="status">Status</th>
                                         <th data-translate="email">Email</th>
                                         <th data-translate="phone">Phone</th>
                                         <th data-translate="subjects">Subjects</th>
@@ -4378,7 +4489,7 @@ if ($page == 'reports') {
                                             STRING_AGG(sub.subject_name, ', ') as enrolled_subjects
                                         FROM students s
                                         LEFT JOIN marks m ON s.id = m.student_id
-                                        LEFT JOIN subjects sub ON m.subject_id = sub.id
+                                        LEFT JOIN subjects sub ON m.subject_id = sub.id AND sub.year = s.year
                                         WHERE s.status = 'active'
                                         GROUP BY s.id, s.name, s.age, s.gender, s.class_level, s.email, s.phone, s.year, s.status
                                         ORDER BY s.id
@@ -4395,37 +4506,43 @@ if ($page == 'reports') {
                                         <td>
                                             <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; 
                                                          background: <?= $student['gender'] == 'Male' ? '#e3f2fd' : '#fce4ec' ?>; 
-                                                         color: <?= $student['gender'] == 'Male' ? '#1565c0' : '#c2185b' ?>;">
-                                                <?= $student['gender'] ?? 'N/A' ?>
+                                                         color: <?= $student['gender'] == 'Male' ? '#1565c0' : '#c2185b' ?>; 
+                                                         display: inline-block; min-width: 60px; text-align: center;">
+                                                <span data-translate="<?= strtolower($student['gender'] ?? 'n_a') ?>"><?= $student['gender'] ?? 'N/A' ?></span>
                                             </span>
                                         </td>
                                         <td>
                                             <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
-                                                         background: var(--primary-light); color: var(--primary-color);">
+                                                         background: var(--primary-light); color: var(--primary-color);
+                                                         display: inline-block; min-width: 70px; text-align: center;">
                                                 Class <?= htmlspecialchars($student['class_level']) ?>
                                             </span>
                                         </td>
                                         <td>
                                             <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
-                                                         background: #f0f9ff; color: #0369a1;">
+                                                         background: #f5f5f5; color: #000000;
+                                                         display: inline-block; min-width: 60px; text-align: center; border: 1px solid #e0e0e0;">
                                                 Year <?= $student['year'] ?? 'N/A' ?>
                                             </span>
                                         </td>
                                         <td>
                                             <?php if ($student['year'] == 1): ?>
-                                                <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;
-                                                             background: #E0F2FE; color: #0284C7;">
-                                                    📚 Year 1 Student
+                                                <span style="padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+                                                             background: #E0F2FE; color: #0284C7;
+                                                             display: inline-block; min-width: 100px; text-align: center;">
+                                                    <span data-translate="year_1_student">Year 1 Student</span>
                                                 </span>
                                             <?php elseif ($student['year'] == 2): ?>
-                                                <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;
-                                                             background: #FEF3C7; color: #D97706;">
-                                                    🎓 Year 2 Student
+                                                <span style="padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+                                                             background: #FEF3C7; color: #D97706;
+                                                             display: inline-block; min-width: 100px; text-align: center;">
+                                                    <span data-translate="year_2_student">Year 2 Student</span>
                                                 </span>
                                             <?php else: ?>
-                                                <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;
-                                                             background: #F3F4F6; color: #6B7280;">
-                                                    ❓ Unknown
+                                                <span style="padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+                                                             background: #F3F4F6; color: #6B7280;
+                                                             display: inline-block; min-width: 100px; text-align: center;">
+                                                    <span data-translate="unknown">Unknown</span>
                                                 </span>
                                             <?php endif; ?>
                                         </td>
@@ -4433,24 +4550,33 @@ if ($page == 'reports') {
                                         <td><?= htmlspecialchars($student['phone'] ?? '') ?></td>
                                         <td>
                                             <?php if (!empty($student['enrolled_subjects'])): ?>
-                                                <div style="font-size: 0.85rem; color: #666;">
-                                                    <?= htmlspecialchars($student['enrolled_subjects']) ?>
+                                                <div style="display: flex; flex-wrap: wrap; gap: 4px; max-width: 300px;">
+                                                    <?php 
+                                                    $subjects = explode(', ', $student['enrolled_subjects']);
+                                                    foreach ($subjects as $subject): 
+                                                    ?>
+                                                        <span style="padding: 3px 8px; background: #f0f9ff; color: #0369a1; 
+                                                                     border-radius: 4px; font-size: 0.75rem; white-space: nowrap;
+                                                                     border: 1px solid #bae6fd;">
+                                                            <?= htmlspecialchars(trim($subject)) ?>
+                                                        </span>
+                                                    <?php endforeach; ?>
                                                 </div>
                                             <?php else: ?>
                                                 <span style="color: #999; font-style: italic;">No subjects</span>
                                             <?php endif; ?>
                                         </td>
                                         <td>
-                                            <button class="export-btn" onclick="editStudent(<?= $student['id'] ?>)" style="margin: 2px;" data-translate="edit">✏️ Edit</button>
+                                            <button class="export-btn" onclick="editStudent(<?= $student['id'] ?>)" style="margin: 2px;" data-translate="edit">Edit</button>
                                             <button class="export-btn" onclick="handleStudentAction('delete_student', <?= $student['id'] ?>)" 
-                                                    style="background: var(--danger-color); color: white; margin: 2px;" data-translate="delete">🗑️ Delete</button>
+                                                    style="background: var(--danger-color); color: white; margin: 2px;" data-translate="delete">Delete</button>
                                             
                                             <?php if ($student['year'] == 1): ?>
                                                 <button class="export-btn" onclick="handleStudentAction('promote_student', <?= $student['id'] ?>)" 
-                                                        style="background: #10B981; color: white; margin: 2px;" data-translate="promote">📈 Promote</button>
+                                                        style="background: #10B981; color: white; margin: 2px;" data-translate="promote">Promote</button>
                                             <?php elseif ($student['year'] == 2): ?>
                                                 <button class="export-btn" onclick="graduateStudent(<?= $student['id'] ?>)" 
-                                                        style="background: #F59E0B; color: white; margin: 2px;" data-translate="graduate">🎓 Graduate</button>
+                                                        style="background: #F59E0B; color: white; margin: 2px;" data-translate="graduate">Graduate</button>
                                             <?php endif; ?>
                                         </td>
                                     </tr>
@@ -4504,7 +4630,7 @@ if ($page == 'reports') {
                                         <th data-translate="age">Age</th>
                                         <th data-translate="gender">Gender</th>
                                         <th data-translate="class">Class</th>
-                                        <th>Graduation Grade</th>
+                                        <th data-translate="graduation_grade">Graduation Grade</th>
                                         <th data-translate="email">Email</th>
                                         <th data-translate="phone">Phone</th>
                                         <th data-translate="graduation_date">Graduation Date</th>
@@ -4675,13 +4801,14 @@ if ($page == 'reports') {
                                         <td><?= $subject['credits'] ?></td>
                                         <td><?= $subject['year'] ? 'Year ' . $subject['year'] : 'N/A' ?></td>
                                         <td>
-                                            <span style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; background: var(--kpi-light-blue); color: white; border-radius: 4px; font-weight: 500;">
-                                                👥 <?= $subject['enrollment_count'] ?? 0 ?> students
+                                            <span style="display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 12px; background: var(--kpi-light-blue); color: white; border-radius: 4px; font-weight: 500; min-width: 90px;">
+                                                <span><?= $subject['enrollment_count'] ?? 0 ?></span>
+                                                <span data-translate="students_count">students</span>
                                             </span>
                                         </td>
                                         <td>
-                                            <button class="export-btn" onclick="editSubject(<?= $subject['id'] ?>)" data-translate="edit">✏️ Edit</button>
-                                            <button class="export-btn" onclick="handleSubjectAction('delete_subject', <?= $subject['id'] ?>)" style="background: var(--danger-color); color: white;" data-translate="delete">🗑️ Delete</button>
+                                            <button class="export-btn" onclick="editSubject(<?= $subject['id'] ?>)" data-translate="edit">Edit</button>
+                                            <button class="export-btn" onclick="handleSubjectAction('delete_subject', <?= $subject['id'] ?>)" style="background: var(--danger-color); color: white;" data-translate="delete">Delete</button>
                                         </td>
                                     </tr>
                                     <?php 
@@ -4714,6 +4841,7 @@ if ($page == 'reports') {
                         <div class="section-header">
                             <h3 class="section-title" data-translate="marks_list"> Marks List</h3>
                             <div class="export-actions">
+                                <button class="export-btn" onclick="collapseAllMarks()" data-translate="collapse_all">📁 Collapse All</button>
                                 <button class="export-btn" onclick="exportData('csv')" data-translate="export_csv">📊 Export CSV</button>
                                 <button class="export-btn" onclick="printTable()" data-translate="print">🖨️ Print</button>
                             </div>
@@ -4725,7 +4853,7 @@ if ($page == 'reports') {
                             <div class="filter-sections">
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="academic_year">Academic Year</label>
-                                    <select id="filterMarksYear" class="premium-select" onchange="updateMarksClassFilter(); filterMarks()">
+                                    <select id="filterMarksYear" class="premium-select" onchange="updateMarksClassFilter(); updateMarksSubjectFilter(); filterMarks()">
                                         <option value="" data-translate="all_years">All Years</option>
                                         <option value="1" data-translate="year_1">Year 1</option>
                                         <option value="2" data-translate="year_2">Year 2</option>
@@ -4736,6 +4864,21 @@ if ($page == 'reports') {
                                     <select id="filterMarksClass" class="premium-select" onchange="filterMarks()">
                                         <option value="" data-translate="all_classes">All Classes</option>
                                         <!-- Options will be populated dynamically -->
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label">Filter by Subject</label>
+                                    <select id="filterMarksSubject" class="premium-select" onchange="filterMarks()">
+                                        <option value="">All Subjects</option>
+                                        <!-- Options will be populated dynamically -->
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label">Sort by Final Grade</label>
+                                    <select id="sortMarksByGrade" class="premium-select" onchange="filterMarks()">
+                                        <option value="">Default</option>
+                                        <option value="asc">Grade: Low to High</option>
+                                        <option value="desc">Grade: High to Low</option>
                                     </select>
                                 </div>
                                 <div class="filter-section">
@@ -4764,7 +4907,7 @@ if ($page == 'reports') {
                                 </thead>
                                 <tbody>
                                     <?php
-                                    // Get all students with marks, grouped by student
+                                    // Get all students with marks, grouped by student (only active students)
                                     $students_marks_query = "
                                         SELECT DISTINCT
                                             s.id as student_id,
@@ -4774,6 +4917,7 @@ if ($page == 'reports') {
                                             s.status as student_status
                                         FROM students s
                                         JOIN marks m ON s.id = m.student_id
+                                        WHERE s.status = 'active'
                                         ORDER BY s.name
                                     ";
                                     $students_marks_result = pg_query($conn, $students_marks_query);
@@ -4853,8 +4997,7 @@ if ($page == 'reports') {
                                         </td>
                                         <td style="text-align: center;">
                                             <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
-                                                         background: <?= $student['student_year'] == 1 ? '#dbeafe' : '#dcfce7' ?>; 
-                                                         color: <?= $student['student_year'] == 1 ? '#1e40af' : '#166534' ?>;">
+                                                         background: #f5f5f5; color: #000000; border: 1px solid #e0e0e0;">
                                                 Year <?= $student['student_year'] ?>
                                             </span>
                                         </td>
@@ -4865,14 +5008,17 @@ if ($page == 'reports') {
                                             </span>
                                         </td>
                                         <td style="text-align: center;">
-                                            <span class="total-subjects-badge"><?= $total_subjects ?> subjects</span>
+                                            <span class="total-subjects-badge">
+                                                <span><?= $total_subjects ?></span>
+                                                <span data-translate="subjects">subjects</span>
+                                            </span>
                                         </td>
                                         <td style="text-align: center;">
                                             <span class="final-grade-display"><?= number_format($total_grade, 2) ?></span>
                                         </td>
                                         <td style="text-align: center;" onclick="event.stopPropagation();">
-                                            <button class="manage-marks-btn" onclick="toggleStudentDetails(<?= $student_id ?>)">
-                                                📝 Manage Marks
+                                            <button class="manage-marks-btn" onclick="toggleStudentDetails(<?= $student_id ?>)" data-translate="manage_marks">
+                                                Manage Marks
                                             </button>
                                         </td>
                                     </tr>
@@ -4881,19 +5027,19 @@ if ($page == 'reports') {
                                     <tr class="subject-details-row" id="details-<?= $student_id ?>">
                                         <td colspan="6">
                                             <div class="subject-details-container">
-                                                <div class="subject-title">📚 Subject Marks - Click Edit to modify</div>
+                                                <div class="subject-title"><span data-translate="subject_marks_title">Subject Marks - Click Edit to modify</span></div>
                                                 <table class="subject-marks-table">
                                                     <thead>
                                                         <tr>
-                                                            <th>Subject</th>
-                                                            <th>Final (60)</th>
-                                                            <th>Midterm (20)</th>
-                                                            <th>Quiz (10)</th>
-                                                            <th>Daily (10)</th>
-                                                            <th>Total</th>
-                                                            <th>Grade</th>
-                                                            <th>Status</th>
-                                                            <th>Actions</th>
+                                                            <th data-translate="subject">Subject</th>
+                                                            <th data-translate="final_exam">Final (60)</th>
+                                                            <th data-translate="midterm_exam">Midterm (20)</th>
+                                                            <th data-translate="quiz">Quiz (10)</th>
+                                                            <th data-translate="daily_activities">Daily (10)</th>
+                                                            <th data-translate="total">Total</th>
+                                                            <th data-translate="grade">Grade</th>
+                                                            <th data-translate="status">Status</th>
+                                                            <th data-translate="actions">Actions</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody>
@@ -4923,10 +5069,10 @@ if ($page == 'reports') {
                                                                                  color: <?= $mark['status'] == 'Pass' ? '#166534' : ($mark['status'] == 'Fail' ? '#dc2626' : '#d97706') ?>;">
                                                                         <?= htmlspecialchars($mark['status']) ?>
                                                                     </span>
-                                                                </td>
+                                                            </td>
                                                                 <td>
-                                                                    <button class="inline-edit-btn" onclick="editMark(<?= $mark['mark_id'] ?>)">✏️ Edit</button>
-                                                                    <button class="inline-delete-btn" onclick="handleMarkAction('delete_mark', <?= $mark['mark_id'] ?>)">🗑️</button>
+                                                                    <button class="inline-edit-btn" onclick="editMark(<?= $mark['mark_id'] ?>)" data-translate="edit">Edit</button>
+                                                                    <button class="inline-delete-btn" onclick="handleMarkAction('delete_mark', <?= $mark['mark_id'] ?>)" title="Reset all marks to 0">Reset</button>
                                                                 </td>
                                                             </tr>
                                                             <?php endforeach; ?>
@@ -4981,6 +5127,12 @@ if ($page == 'reports') {
             once: true,
             offset: 100
         });
+
+        // Global subjects data for filters
+        <?php
+        $all_subjects_for_filter = pg_query($conn, "SELECT id, subject_name, year FROM subjects ORDER BY year, subject_name");
+        echo "const allSubjects = " . json_encode(pg_fetch_all($all_subjects_for_filter)) . ";\n";
+        ?>
 
         // ===== COUNT UP ANIMATION UTILITY =====
         class CountUp {
@@ -5124,6 +5276,219 @@ if ($page == 'reports') {
             setTimeout(() => {
                 observeKPICards();
             }, 100);
+        });
+
+        // ============================================
+        // BLUR TEXT ANIMATION CLASS
+        // ============================================
+        class BlurText {
+            constructor(element, options = {}) {
+                this.element = element;
+                this.text = element.textContent.trim();
+                this.animateBy = options.animateBy || 'words'; // 'words' or 'characters'
+                this.delay = options.delay || 50; // ms between each word/character
+                this.direction = options.direction || 'top'; // 'top' or 'bottom'
+                this.threshold = options.threshold || 0.1;
+                this.rootMargin = options.rootMargin || '0px';
+                this.onComplete = options.onComplete || null;
+                this.stepDuration = options.stepDuration || 350; // ms for each animation step
+                
+                this.animated = false;
+                this.observer = null;
+                
+                // Detect if text is RTL (Arabic/Kurdish)
+                this.isRTL = this.detectRTL(this.text);
+                
+                this.init();
+            }
+            
+            detectRTL(text) {
+                // Check for Arabic, Hebrew, Kurdish (Sorani) characters
+                const rtlChars = /[\u0600-\u06FF\u0750-\u077F\u0590-\u05FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+                return rtlChars.test(text);
+            }
+            
+            init() {
+                // Clear original text
+                this.element.textContent = '';
+                this.element.style.display = 'flex';
+                this.element.style.flexWrap = 'wrap';
+                this.element.style.gap = '0';
+                this.element.style.justifyContent = 'center';
+                
+                // For RTL languages, always animate by words (not characters)
+                // This preserves Arabic letter connections and text shaping
+                const shouldAnimateByWords = this.isRTL || this.animateBy === 'words';
+                
+                // Split text into segments
+                const segments = shouldAnimateByWords
+                    ? this.text.split(' ') 
+                    : Array.from(this.text);
+                
+                // Set text direction
+                if (this.isRTL) {
+                    this.element.style.direction = 'rtl';
+                }
+                
+                // Create span elements for each segment
+                segments.forEach((segment, index) => {
+                    const span = document.createElement('span');
+                    span.textContent = segment;
+                    span.style.display = 'inline-block';
+                    span.style.willChange = 'transform, filter, opacity';
+                    span.className = 'blur-text-segment';
+                    
+                    // Preserve text direction for RTL
+                    if (this.isRTL) {
+                        span.style.direction = 'rtl';
+                        span.style.unicodeBidi = 'embed';
+                    }
+                    
+                    // Set initial state
+                    const yOffset = this.direction === 'top' ? -50 : 50;
+                    span.style.transform = `translateY(${yOffset}px)`;
+                    span.style.filter = 'blur(10px)';
+                    span.style.opacity = '0';
+                    
+                    this.element.appendChild(span);
+                    
+                    // Add space after words (but not after last word)
+                    if (shouldAnimateByWords && index < segments.length - 1) {
+                        const space = document.createElement('span');
+                        space.innerHTML = '&nbsp;';
+                        space.style.display = 'inline-block';
+                        this.element.appendChild(space);
+                    }
+                });
+                
+                // Setup intersection observer
+                this.setupObserver();
+            }
+            
+            setupObserver() {
+                this.observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting && !this.animated) {
+                            this.animated = true;
+                            this.animate();
+                            this.observer.unobserve(this.element);
+                        }
+                    });
+                }, {
+                    threshold: this.threshold,
+                    rootMargin: this.rootMargin
+                });
+                
+                this.observer.observe(this.element);
+            }
+            
+            animate() {
+                const segments = this.element.querySelectorAll('.blur-text-segment');
+                const yMid = this.direction === 'top' ? 5 : -5;
+                
+                segments.forEach((span, index) => {
+                    const baseDelay = index * this.delay;
+                    
+                    // Create multi-step animation using CSS transitions
+                    setTimeout(() => {
+                        // Step 1: Move to mid-point with partial blur
+                        span.style.transition = `all ${this.stepDuration}ms cubic-bezier(0.34, 1.56, 0.64, 1)`;
+                        span.style.transform = `translateY(${yMid}px)`;
+                        span.style.filter = 'blur(5px)';
+                        span.style.opacity = '0.5';
+                        
+                        // Step 2: Move to final position, remove blur
+                        setTimeout(() => {
+                            span.style.transition = `all ${this.stepDuration}ms cubic-bezier(0.34, 1.56, 0.64, 1)`;
+                            span.style.transform = 'translateY(0)';
+                            span.style.filter = 'blur(0px)';
+                            span.style.opacity = '1';
+                            
+                            // Call onComplete for last segment
+                            if (index === segments.length - 1 && this.onComplete) {
+                                setTimeout(() => this.onComplete(), this.stepDuration);
+                            }
+                        }, this.stepDuration);
+                    }, baseDelay);
+                });
+            }
+            
+            reset() {
+                this.animated = false;
+                const segments = this.element.querySelectorAll('.blur-text-segment');
+                const yOffset = this.direction === 'top' ? -50 : 50;
+                
+                segments.forEach(span => {
+                    span.style.transition = 'none';
+                    span.style.transform = `translateY(${yOffset}px)`;
+                    span.style.filter = 'blur(10px)';
+                    span.style.opacity = '0';
+                });
+                
+                if (this.observer) {
+                    this.observer.observe(this.element);
+                }
+            }
+            
+            destroy() {
+                if (this.observer) {
+                    this.observer.disconnect();
+                }
+                this.element.textContent = this.text;
+                this.element.style.display = '';
+                this.element.style.flexWrap = '';
+                this.element.style.gap = '';
+            }
+        }
+        
+        // Function to initialize blur text animations for dashboard headers
+        function initializeHeaderAnimations() {
+            const headers = document.querySelectorAll('.dashboard-header h1');
+            const subtitles = document.querySelectorAll('.dashboard-header .dashboard-subtitle');
+            
+            headers.forEach(h1 => {
+                // Skip if already initialized
+                if (h1.blurTextInstance) {
+                    h1.blurTextInstance.reset();
+                    return;
+                }
+                
+                // Note: BlurText will auto-detect RTL and use words instead of characters
+                const blurText = new BlurText(h1, {
+                    animateBy: 'characters', // Will be overridden to 'words' for RTL
+                    delay: 35,
+                    direction: 'top',
+                    threshold: 0.1,
+                    stepDuration: 350
+                });
+                
+                h1.blurTextInstance = blurText;
+            });
+            
+            subtitles.forEach(p => {
+                // Skip if already initialized
+                if (p.blurTextInstance) {
+                    p.blurTextInstance.reset();
+                    return;
+                }
+                
+                const blurText = new BlurText(p, {
+                    animateBy: 'words',
+                    delay: 80,
+                    direction: 'top',
+                    threshold: 0.1,
+                    stepDuration: 400
+                });
+                
+                p.blurTextInstance = blurText;
+            });
+        }
+        
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                initializeHeaderAnimations();
+            }, 200);
         });
 
         // Define updateGradeDistributionChart function globally so it's available immediately
@@ -5342,7 +5707,7 @@ if ($page == 'reports') {
                 FROM subjects sub
                 LEFT JOIN marks m ON sub.id = m.subject_id
                 LEFT JOIN students s ON m.student_id = s.id
-                WHERE sub.year = 1
+                WHERE sub.year = 1 AND (s.status = 'active' OR s.id IS NULL)
                 GROUP BY sub.id, sub.subject_name
                 ORDER BY avg_mark DESC NULLS LAST
             ");
@@ -5447,7 +5812,7 @@ if ($page == 'reports') {
                 FROM subjects sub
                 LEFT JOIN marks m ON sub.id = m.subject_id
                 LEFT JOIN students s ON m.student_id = s.id
-                WHERE sub.year = 2
+                WHERE sub.year = 2 AND (s.status = 'active' OR s.id IS NULL)
                 GROUP BY sub.id, sub.subject_name
                 ORDER BY avg_mark DESC NULLS LAST
             ");
@@ -5552,7 +5917,7 @@ if ($page == 'reports') {
                     COUNT(m.mark) as subjects_count
                 FROM students s
                 JOIN marks m ON s.id = m.student_id
-                WHERE m.mark > 0 AND s.year = 1
+                WHERE m.mark > 0 AND s.year = 1 AND s.status = 'active'
                 GROUP BY s.id, s.name
                 HAVING COUNT(m.mark) >= 2
                 ORDER BY AVG(m.mark) DESC
@@ -5675,7 +6040,7 @@ if ($page == 'reports') {
                     COUNT(m.mark) as subjects_count
                 FROM students s
                 JOIN marks m ON s.id = m.student_id
-                WHERE m.mark > 0 AND s.year = 2
+                WHERE m.mark > 0 AND s.year = 2 AND s.status = 'active'
                 GROUP BY s.id, s.name
                 HAVING COUNT(m.mark) >= 2
                 ORDER BY AVG(m.mark) DESC
@@ -6295,6 +6660,32 @@ if ($page == 'reports') {
             //     }
             // });
         }
+        
+        // Collapse all expanded marks panels
+        function collapseAllMarks() {
+            // Remove expanded class from all main rows
+            document.querySelectorAll('.student-main-row.expanded').forEach(row => {
+                row.classList.remove('expanded');
+            });
+            
+            // Remove show class from all details rows
+            document.querySelectorAll('.subject-details-row.show').forEach(row => {
+                row.classList.remove('show');
+            });
+        }
+        
+        // Collapse all expanded reports panels (for Analytics/Dashboard page)
+        function collapseAllReports() {
+            // Remove expanded class from all main rows
+            document.querySelectorAll('.student-main-row.expanded').forEach(row => {
+                row.classList.remove('expanded');
+            });
+            
+            // Remove show class from all details rows
+            document.querySelectorAll('.subject-details-row.show').forEach(row => {
+                row.classList.remove('show');
+            });
+        }
 
         // Loading overlay functions
         function showLoading(message = 'Processing', subtext = 'Please wait while we update your data') {
@@ -6561,6 +6952,9 @@ if ($page == 'reports') {
                 } else if (document.getElementById('reportsTable')) {
                     table = document.getElementById('reportsTable');
                     filename = 'reports_export.csv';
+                } else if (document.querySelector('.graduated-section table')) {
+                    table = document.querySelector('.graduated-section table');
+                    filename = 'graduated_students_export.csv';
                 }
                 
                 if (!table) {
@@ -6612,23 +7006,196 @@ if ($page == 'reports') {
             }
         }
 
+        // =====================================================
+        // UNIFIED PRINT SYSTEM - Professional Report Format
+        // =====================================================
+        // All print functions use the same professional template
+        // with consistent header, styling, and branding
+        // =====================================================
+
+        // Unified print template generator for all pages
+        function generatePrintTemplate(title, content, additionalStyles = '') {
+            return `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <title>${title}</title>
+                    <style>
+                        * {
+                            margin: 0;
+                            padding: 0;
+                            box-sizing: border-box;
+                        }
+                        
+                        body {
+                            font-family: Arial, sans-serif;
+                            line-height: 1.5;
+                            color: #000;
+                            background: #fff;
+                            padding: 20mm;
+                        }
+                        
+                        .report-header {
+                            text-align: center;
+                            margin-bottom: 30px;
+                            padding-bottom: 15px;
+                            border-bottom: 2px solid #000;
+                        }
+                        
+                        .report-header h1 {
+                            font-size: 24px;
+                            font-weight: bold;
+                            margin-bottom: 8px;
+                            text-transform: uppercase;
+                            letter-spacing: 1px;
+                        }
+                        
+                        .report-meta {
+                            font-size: 11px;
+                            color: #333;
+                            line-height: 1.6;
+                        }
+                        
+                        table {
+                            width: 100%;
+                            border-collapse: collapse;
+                            margin-bottom: 20px;
+                        }
+                        
+                        th {
+                            background: #f0f0f0;
+                            border: 1px solid #000;
+                            padding: 10px 8px;
+                            text-align: left;
+                            font-size: 11px;
+                            font-weight: bold;
+                            text-transform: uppercase;
+                        }
+                        
+                        td {
+                            border: 1px solid #666;
+                            padding: 8px;
+                            text-align: left;
+                            font-size: 11px;
+                        }
+                        
+                        tbody tr:nth-child(even) {
+                            background: #fafafa;
+                        }
+                        
+                        tbody tr:hover {
+                            background: #f5f5f5;
+                        }
+                        
+                        .failed-grade {
+                            color: #dc2626;
+                            font-weight: bold;
+                        }
+                        
+                        .failed-total {
+                            color: #dc2626;
+                            text-decoration: underline;
+                            font-weight: bold;
+                        }
+                        
+                        .status-pass {
+                            color: #16a34a;
+                            font-weight: bold;
+                        }
+                        
+                        .status-fail {
+                            color: #dc2626;
+                            font-weight: bold;
+                        }
+                        
+                        .page-break {
+                            page-break-after: always;
+                        }
+                        
+                        .no-print {
+                            display: none;
+                        }
+                        
+                        @media print {
+                            body {
+                                padding: 10mm;
+                            }
+                            
+                            .page-break {
+                                page-break-after: always;
+                            }
+                            
+                            @page {
+                                margin: 15mm;
+                                size: A4;
+                            }
+                        }
+                        
+                        ${additionalStyles}
+                    </style>
+                </head>
+                <body>
+                    <div class="report-header">
+                        <h1>${title}</h1>
+                        <div class="report-meta">
+                            Generated on: ${new Date().toLocaleString('en-US', { 
+                                year: 'numeric', 
+                                month: 'long', 
+                                day: 'numeric', 
+                                hour: '2-digit', 
+                                minute: '2-digit'
+                            })}<br>
+                            Student Management System
+                        </div>
+                    </div>
+                    
+                    ${content}
+                    
+                    <script>
+                        window.onload = function() {
+                            setTimeout(function() {
+                                window.print();
+                            }, 500);
+                        };
+                        
+                        window.onafterprint = function() {
+                            window.close();
+                        };
+                    <\/script>
+                </body>
+                </html>
+            `;
+        }
+
         function printTable() {
-            // Get the current page's table for printing
+            // Check if this is the Analytics Report (reports page)
+            if (document.getElementById('reportsTable')) {
+                printAnalyticsReport();
+                return;
+            }
+            
+            // Check if this is the Marks page
+            if (document.getElementById('marksTable')) {
+                printMarksReport();
+                return;
+            }
+            
+            // Get the current page's table for printing (other pages)
             let table = null;
             let pageTitle = 'Data Export';
+            let isStudentsPage = false;
             
-            if (document.getElementById('marksTable')) {
-                table = document.getElementById('marksTable');
-                pageTitle = 'Student Marks Report';
-            } else if (document.getElementById('studentsTable')) {
+            if (document.getElementById('studentsTable')) {
                 table = document.getElementById('studentsTable');
-                pageTitle = 'Students Report';
+                pageTitle = 'Students List';
+                isStudentsPage = true;
             } else if (document.getElementById('subjectsTable')) {
                 table = document.getElementById('subjectsTable');
-                pageTitle = 'Subjects Report';
-            } else if (document.getElementById('reportsTable')) {
-                table = document.getElementById('reportsTable');
-                pageTitle = 'Analytics Report';
+                pageTitle = 'Subjects List';
+            } else if (document.querySelector('.graduated-section table')) {
+                table = document.querySelector('.graduated-section table');
+                pageTitle = 'Graduated Students Report';
             }
             
             if (!table) {
@@ -6636,57 +7203,887 @@ if ($page == 'reports') {
                 return;
             }
             
-            // Create a new window for printing
-            const printWindow = window.open('', '_blank');
+            // For Students page, create custom formatted content
+            if (isStudentsPage) {
+                printStudentsReport();
+                return;
+            }
+            
+            // Clone the table for other pages
             const tableClone = table.cloneNode(true);
             
-            // Remove hidden rows from the clone
+            // Remove hidden rows and action columns
             const rows = tableClone.querySelectorAll('tr');
             rows.forEach(row => {
                 if (row.style.display === 'none') {
                     row.remove();
+                    return;
+                }
+                
+                // Remove "Actions" column header and cells
+                const cells = row.querySelectorAll('th, td');
+                cells.forEach((cell, index) => {
+                    if (cell.textContent.includes('Actions') || cell.querySelector('button')) {
+                        cell.remove();
+                    }
+                });
+            });
+            
+            // Generate content HTML
+            const content = tableClone.outerHTML;
+            
+            // Additional styles specific to table printing
+            const additionalStyles = `
+                table {
+                    font-size: 10px;
+                }
+                
+                th {
+                    background: #000 !important;
+                    color: #fff !important;
+                    border: 1px solid #000 !important;
+                }
+                
+                td {
+                    vertical-align: top;
+                }
+                
+                .status-badge {
+                    padding: 2px 6px;
+                    border-radius: 3px;
+                    font-size: 9px;
+                    font-weight: bold;
+                }
+            `;
+            
+            // Create print window with unified template
+            const printWindow = window.open('', '_blank');
+            const printHTML = generatePrintTemplate(pageTitle, content, additionalStyles);
+            
+            printWindow.document.write(printHTML);
+            printWindow.document.close();
+        }
+        
+        // Custom print function for Students page
+        function printStudentsReport() {
+            const rows = document.querySelectorAll('#studentsTable tbody tr');
+            const visibleRows = Array.from(rows).filter(row => row.style.display !== 'none');
+            
+            if (visibleRows.length === 0) {
+                alert('No students to print');
+                return;
+            }
+            
+            // Get current filter values to generate report description
+            const yearFilter = document.getElementById('filterStudentYear').value;
+            const classFilter = document.getElementById('filterStudentClass').value;
+            const genderFilter = document.getElementById('filterStudentGender').value;
+            const ageFilter = document.getElementById('filterStudentAge').value;
+            const enrollmentFilter = document.getElementById('filterStudentEnrollment').value;
+            
+            // Generate human-readable report description
+            let reportDescription = 'This report presents a comprehensive list of ';
+            let filters = [];
+            
+            if (yearFilter) {
+                filters.push(`Year ${yearFilter}`);
+            }
+            
+            if (classFilter) {
+                filters.push(`${classFilter}`);
+            }
+            
+            if (genderFilter) {
+                filters.push(`${genderFilter}`);
+            }
+            
+            if (ageFilter) {
+                filters.push(`age range ${ageFilter}`);
+            }
+            
+            if (enrollmentFilter) {
+                filters.push(enrollmentFilter === 'enrolled' ? 'enrolled in subjects' : 'not enrolled in any subjects');
+            }
+            
+            if (filters.length > 0) {
+                reportDescription += filters.join(', ') + ' students';
+            } else {
+                reportDescription += 'all active students';
+            }
+            
+            reportDescription += ` currently registered in the Student Management System. The report contains detailed information including student names, age, gender, class assignment, academic year, current enrollment status, and contact information. This document serves as an official record and can be used for administrative purposes, academic planning, and student tracking. Total number of students matching the criteria: ${visibleRows.length}.`;
+            
+            let tableRows = '';
+            
+            visibleRows.forEach((row, index) => {
+                const cells = row.querySelectorAll('td');
+                
+                // Extract data from cells (excluding ID and subjects columns)
+                const name = cells[1]?.textContent.trim() || '';
+                const age = cells[2]?.textContent.trim() || '';
+                const gender = cells[3]?.textContent.trim() || '';
+                const classLevel = cells[4]?.textContent.trim().replace('Class ', '') || '';
+                const year = cells[5]?.textContent.trim().replace('Year ', '') || '';
+                const status = cells[6]?.textContent.trim() || '';
+                const email = cells[7]?.textContent.trim() || 'N/A';
+                const phone = cells[8]?.textContent.trim() || 'N/A';
+                
+                tableRows += `
+                    <tr>
+                        <td>${name}</td>
+                        <td>${age}</td>
+                        <td>${gender}</td>
+                        <td>${classLevel}</td>
+                        <td>Year ${year}</td>
+                        <td>${status}</td>
+                        <td>${email}</td>
+                        <td>${phone}</td>
+                    </tr>
+                `;
+            });
+            
+            const studentsHTML = `
+                <div style="background: #f9f9f9; padding: 20px; margin-bottom: 25px; border-left: 4px solid #000; border-right: 4px solid #000;">
+                    <h3 style="margin: 0 0 10px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px;">Report Summary</h3>
+                    <p style="margin: 0; font-size: 11px; line-height: 1.8; text-align: justify; color: #333;">
+                        ${reportDescription}
+                    </p>
+                </div>
+                
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Age</th>
+                            <th>Gender</th>
+                            <th>Class</th>
+                            <th>Year</th>
+                            <th>Status</th>
+                            <th>Email</th>
+                            <th>Phone</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${tableRows}
+                    </tbody>
+                </table>
+                
+                <div style="margin-top: 20px; padding: 15px; background: #f5f5f5; border: 2px solid #000; text-align: center;">
+                    <strong>Total Students: ${visibleRows.length}</strong>
+                </div>
+            `;
+            
+            const additionalStyles = `
+                table {
+                    font-size: 11px;
+                    width: 100%;
+                }
+                
+                th {
+                    background: #000 !important;
+                    color: #fff !important;
+                    text-align: center;
+                    vertical-align: middle;
+                    padding: 12px 8px;
+                    font-size: 11px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                
+                td {
+                    padding: 10px 8px;
+                    vertical-align: middle;
+                    text-align: center;
+                    border: 1px solid #666;
+                    color: #000;
+                }
+                
+                tbody tr:nth-child(even) {
+                    background: #fafafa;
+                }
+                
+                tbody tr:hover {
+                    background: #f0f0f0;
+                }
+                
+                .status-pass,
+                .status-fail {
+                    color: #000;
+                    font-weight: normal;
+                }
+            `;
+            
+            const printWindow = window.open('', '_blank');
+            const printHTML = generatePrintTemplate('Students List', studentsHTML, additionalStyles);
+            
+            printWindow.document.write(printHTML);
+            printWindow.document.close();
+        }
+
+        // Print Marks Report with Summary
+        function printMarksReport() {
+            const table = document.getElementById('marksTable');
+            const rows = Array.from(table.querySelectorAll('tbody tr.student-main-row'));
+            const visibleRows = rows.filter(row => row.style.display !== 'none');
+            
+            if (visibleRows.length === 0) {
+                alert('No data to print');
+                return;
+            }
+            
+            // Calculate statistics
+            const grades = visibleRows.map(row => {
+                const cells = row.querySelectorAll('td');
+                return parseFloat(cells[4].textContent) || 0;
+            });
+            
+            const total = grades.length;
+            const avgGrade = grades.reduce((sum, g) => sum + g, 0) / total;
+            const maxGrade = Math.max(...grades);
+            const minGrade = Math.min(...grades);
+            
+            // Generate filter description
+            const yearFilter = document.getElementById('filterMarksYear').value;
+            const classFilter = document.getElementById('filterMarksClass').value;
+            const subjectFilter = document.getElementById('filterMarksSubject').value;
+            
+            let reportDescription = 'This report presents a comprehensive overview of student marks ';
+            let filters = [];
+            
+            if (yearFilter) filters.push(`Year ${yearFilter}`);
+            if (classFilter) filters.push(`${classFilter}`);
+            if (subjectFilter) filters.push(`enrolled in ${subjectFilter}`);
+            
+            if (filters.length > 0) {
+                reportDescription += 'for students in ' + filters.join(', ') + '. ';
+            } else {
+                reportDescription += 'for all students currently enrolled in the system. ';
+            }
+            
+            reportDescription += `The report includes detailed information about each student's academic performance, year level, class assignment, total enrolled subjects, and cumulative final grade. `;
+            reportDescription += `This document serves as an official academic record and can be used for performance evaluation, academic planning, and progress tracking. `;
+            reportDescription += `Summary statistics: Average grade is ${avgGrade.toFixed(2)}, with the highest grade being ${maxGrade.toFixed(2)} and the lowest grade being ${minGrade.toFixed(2)}. `;
+            reportDescription += `Total number of students matching the criteria: ${total}.`;
+            
+            // Clone and clean table
+            const tableClone = table.cloneNode(true);
+            const cloneRows = tableClone.querySelectorAll('tbody tr');
+            cloneRows.forEach(row => {
+                if (row.style.display === 'none' || row.classList.contains('subject-details-row')) {
+                    row.remove();
+                    return;
+                }
+                // Remove Actions column
+                const actionCell = row.querySelector('td:last-child');
+                if (actionCell && actionCell.querySelector('button')) {
+                    actionCell.remove();
                 }
             });
             
-            // Create print document
-            const printDocument = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>${pageTitle}</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; margin: 20px; }
-                        h1 { color: #333; text-align: center; margin-bottom: 20px; }
-                        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-                        th { background-color: #f5f5f5; font-weight: bold; }
-                        tr:nth-child(even) { background-color: #f9f9f9; }
-                        .print-info { text-align: center; margin-bottom: 20px; font-size: 0.9em; color: #666; }
-                        @media print {
-                            body { margin: 0; }
-                            .no-print { display: none; }
-                        }
-                    </style>
-                </head>
-                <body>
-                    <h1>${pageTitle}</h1>
-                    <div class="print-info">
-                        Generated on: ${new Date().toLocaleString()}<br>
-                        Student Management System
-                    </div>
-                    ${tableClone.outerHTML}
-                </body>
-                </html>
+            // Remove Actions header
+            const headerCells = tableClone.querySelectorAll('thead th');
+            if (headerCells.length > 0) {
+                headerCells[headerCells.length - 1].remove();
+            }
+            
+            const marksHTML = `
+                <div class="report-summary">
+                    <h3>REPORT SUMMARY</h3>
+                    <p>${reportDescription}</p>
+                </div>
+                
+                ${tableClone.outerHTML}
             `;
             
-            printWindow.document.write(printDocument);
+            const additionalStyles = `
+                .report-summary {
+                    background: #f5f5f5;
+                    border: 2px solid #000;
+                    padding: 15px;
+                    margin-bottom: 20px;
+                    page-break-inside: avoid;
+                }
+                
+                .report-summary h3 {
+                    margin: 0 0 10px 0;
+                    font-size: 14px;
+                    font-weight: bold;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                
+                .report-summary p {
+                    margin: 0;
+                    font-size: 11px;
+                    line-height: 1.6;
+                    text-align: justify;
+                }
+            `;
+            
+            const printWindow = window.open('', '_blank');
+            const printHTML = generatePrintTemplate('Student Marks Report', marksHTML, additionalStyles);
+            
+            printWindow.document.write(printHTML);
+            printWindow.document.close();
+        }
+
+        // Dedicated function for printing Analytics Report with professional formatting
+        function printAnalyticsReport() {
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            
+            // Get all visible student rows
+            const studentRows = document.querySelectorAll('#reportsTable tbody tr.student-main-row');
+            const visibleStudents = Array.from(studentRows).filter(row => row.style.display !== 'none');
+            
+            if (visibleStudents.length === 0) {
+                alert(getTranslation('no_data_to_print') || 'No data to print');
+                return;
+            }
+            
+            // Show loading message
+            showLoading(getTranslation('print') || 'Preparing Report', 'Loading student data for printing...');
+            
+            // Expand all visible students to ensure data is loaded
+            visibleStudents.forEach(row => {
+                const studentId = row.getAttribute('data-student-id');
+                const detailsRow = document.getElementById(`details-${studentId}`);
+                if (detailsRow && !detailsRow.classList.contains('show')) {
+                    toggleStudentDetails(studentId);
+                }
+            });
+            
+            // Wait a bit for all details to load, then collect data
+            setTimeout(() => {
+                collectAndPrintData();
+                hideLoading();
+            }, 800);
+        }
+        
+        // Function to collect data and generate print document
+        function collectAndPrintData() {
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            const studentRows = document.querySelectorAll('#reportsTable tbody tr.student-main-row');
+            const visibleStudents = Array.from(studentRows).filter(row => row.style.display !== 'none');
+            
+            console.log('Total visible students:', visibleStudents.length);
+            
+            // Collect student data
+            const studentsData = [];
+            visibleStudents.forEach(row => {
+                const studentId = row.getAttribute('data-student-id');
+                const cells = row.querySelectorAll('td');
+                const studentName = cells[0].querySelector('strong')?.textContent.trim() || cells[0].textContent.trim();
+                const yearBadge = cells[1].textContent.trim();
+                const classBadge = cells[2].textContent.trim();
+                
+                console.log('Processing student:', studentName, studentId);
+                
+                // Get the expanded details row (using correct class name)
+                const detailsRow = document.getElementById(`details-${studentId}`);
+                if (!detailsRow) {
+                    console.warn(`Details row not found for student ${studentId}`);
+                    return;
+                }
+                
+                const marksContainer = detailsRow.querySelector('.subject-details-container');
+                if (!marksContainer) {
+                    console.warn(`Marks container not found for student ${studentId}`);
+                    return;
+                }
+                
+                console.log('Found marks container for:', studentName);
+                
+                // Extract marks data from the single table
+                const year1Marks = [];
+                const year2Marks = [];
+                let year1Total = 0;
+                let year2Total = 0;
+                
+                const marksTable = marksContainer.querySelector('.subject-marks-table');
+                if (marksTable) {
+                    const rows = marksTable.querySelectorAll('tbody tr');
+                    let currentYear = null;
+                    let pendingMarks = [];
+                    
+                    console.log('Total rows in marks table:', rows.length);
+                    
+                    rows.forEach((tr, index) => {
+                        const cells = tr.querySelectorAll('td');
+                        
+                        // Check if this is a Year Total row
+                        if (cells.length > 0 && cells[0].textContent.includes('Year') && cells[0].textContent.includes('Total')) {
+                            const yearText = cells[0].textContent;
+                            const totalCell = cells[cells.length - 1];
+                            const totalValue = parseFloat(totalCell.textContent.trim()) || 0;
+                            
+                            console.log('Found year total row:', yearText, 'Total:', totalValue);
+                            
+                            if (yearText.includes('Year 1')) {
+                                // Assign pending marks to Year 1
+                                year1Marks.push(...pendingMarks);
+                                pendingMarks = [];
+                                year1Total = totalValue;
+                                currentYear = 2; // Switch to Year 2 for next subjects
+                                console.log('Switched to Year 2 after Year 1 total');
+                            } else if (yearText.includes('Year 2')) {
+                                // Assign pending marks to Year 2
+                                year2Marks.push(...pendingMarks);
+                                pendingMarks = [];
+                                year2Total = totalValue;
+                                currentYear = null; // No more years expected
+                                console.log('Year 2 total found, marking end');
+                            }
+                        }
+                        // Regular mark row - check for enough cells and not empty
+                        else if (cells.length >= 7 && cells[0].textContent.trim() && !cells[0].textContent.includes('No marks')) {
+                            const markData = {
+                                subject: cells[0].textContent.trim(),
+                                final: cells[1].textContent.trim(),
+                                midterm: cells[2].textContent.trim(),
+                                quizzes: cells[3].textContent.trim(),
+                                daily: cells[4].textContent.trim(),
+                                total: cells[5].textContent.trim(),
+                                grade: cells[6].querySelector('.grade-badge')?.textContent.trim() || cells[6].textContent.trim()
+                            };
+                            
+                            // Add to pending marks - they'll be assigned when we hit the Year Total row
+                            pendingMarks.push(markData);
+                            console.log('Added mark to pending:', markData.subject, 'Current year context:', currentYear);
+                        }
+                    });
+                    
+                    // Assign any remaining pending marks (shouldn't happen if data is well-formed)
+                    if (pendingMarks.length > 0) {
+                        console.warn('Remaining pending marks:', pendingMarks.length);
+                        if (currentYear === 2 || year1Total > 0) {
+                            year2Marks.push(...pendingMarks);
+                        } else {
+                            year1Marks.push(...pendingMarks);
+                        }
+                    }
+                }
+                
+                console.log('Year 1 marks:', year1Marks.length, 'Year 2 marks:', year2Marks.length);
+                console.log('Year 1 subjects:', year1Marks.map(m => m.subject));
+                console.log('Year 2 subjects:', year2Marks.map(m => m.subject));
+                
+                // Calculate pass/fail status for each year
+                const year1Credits = parseFloat(year1Total) || 0;
+                const year1HasF = year1Marks.some(m => m.grade.trim().toUpperCase() === 'F');
+                const year1Status = (year1Credits >= 25 && !year1HasF) ? 'PASS' : 'FAIL';
+                
+                const year2Credits = parseFloat(year2Total) || 0;
+                const year2HasF = year2Marks.some(m => m.grade.trim().toUpperCase() === 'F');
+                const year2Status = (year2Credits >= 25 && !year2HasF) ? 'PASS' : 'FAIL';
+                
+                const combinedTotal = (year1Credits + year2Credits).toFixed(2);
+                
+                console.log('Student:', studentName, 'Y1 Credits:', year1Credits, 'Y1 Status:', year1Status, 'Y2 Credits:', year2Credits, 'Y2 Status:', year2Status);
+                
+                studentsData.push({
+                    name: studentName,
+                    year: yearBadge,
+                    class: classBadge,
+                    year1Marks,
+                    year2Marks,
+                    year1Total: year1Total.toFixed(2),
+                    year2Total: year2Total.toFixed(2),
+                    year1Status,
+                    year2Status,
+                    combinedTotal
+                });
+            });
+            
+            console.log('Total students data collected:', studentsData.length);
+            console.log('Students data:', studentsData);
+            
+            if (studentsData.length === 0) {
+                alert(getTranslation('no_data_to_print') || 'No data available to print');
+                return;
+            }
+            
+            // Check if data has the required properties
+            studentsData.forEach((student, idx) => {
+                console.log(`Student ${idx}:`, {
+                    name: student.name,
+                    year1Marks: student.year1Marks?.length || 0,
+                    year2Marks: student.year2Marks?.length || 0,
+                    year1Total: student.year1Total,
+                    year2Total: student.year2Total,
+                    year1Status: student.year1Status,
+                    year2Status: student.year2Status,
+                    combinedTotal: student.combinedTotal
+                });
+            });
+            
+            console.log('About to generate HTML...');
+            
+            // Generate HTML for print
+            const printWindow = window.open('', '_blank');
+            
+            if (!printWindow) {
+                alert('Pop-up blocked! Please allow pop-ups for this site.');
+                return;
+            }
+            
+            console.log('Print window opened successfully');
+            
+            // Build student sections separately to avoid complex template literals
+            let studentSections = '';
+            
+            studentsData.forEach((student, index) => {
+                console.log(`Building HTML for student ${index}: ${student.name}`);
+                
+                // Build Year 1 marks table
+                let year1Section = '';
+                if (student.year1Marks && student.year1Marks.length > 0) {
+                    let year1Rows = '';
+                    student.year1Marks.forEach(mark => {
+                        const total = parseInt(mark.total) || 0;
+                        const isFailed = total < 50;
+                        const isGradeF = mark.grade.trim().toUpperCase() === 'F';
+                        year1Rows += `
+                            <tr>
+                                <td>${mark.subject}</td>
+                                <td>${mark.final}</td>
+                                <td>${mark.midterm}</td>
+                                <td>${mark.quizzes}</td>
+                                <td>${mark.daily}</td>
+                                <td><strong class="${isFailed ? 'failed-total' : ''}">${mark.total}</strong></td>
+                                <td><strong class="${isGradeF ? 'failed-grade' : ''}">${mark.grade}</strong></td>
+                            </tr>
+                        `;
+                    });
+                    
+                    year1Section = `
+                        <div class="year-section">
+                            <div class="year-title">Year 1 - Subject Marks</div>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Subject</th>
+                                        <th>Final<br>(60)</th>
+                                        <th>Midterm<br>(20)</th>
+                                        <th>Quiz<br>(10)</th>
+                                        <th>Daily<br>(10)</th>
+                                        <th>Total</th>
+                                        <th>Grade</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${year1Rows}
+                                </tbody>
+                            </table>
+                            <div class="year-summary">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <div style="text-align: left;">
+                                        <strong>Academic Status:</strong> 
+                                        <span style="color: ${student.year1Status === 'PASS' ? '#16a34a' : '#dc2626'}; font-weight: bold;">
+                                            ${student.year1Status}
+                                        </span>
+                                    </div>
+                                    <div style="text-align: right;">
+                                        <strong>Year 1 Total Credits:</strong> 
+                                        <span style="font-size: 14px; color: ${parseFloat(student.year1Total) >= 25 ? '#16a34a' : '#dc2626'};">
+                                            ${student.year1Total} / 50.00
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                // Build Year 2 marks table
+                let year2Section = '';
+                if (student.year2Marks && student.year2Marks.length > 0) {
+                    let year2Rows = '';
+                    student.year2Marks.forEach(mark => {
+                        const total = parseInt(mark.total) || 0;
+                        const isFailed = total < 50;
+                        const isGradeF = mark.grade.trim().toUpperCase() === 'F';
+                        year2Rows += `
+                            <tr>
+                                <td>${mark.subject}</td>
+                                <td>${mark.final}</td>
+                                <td>${mark.midterm}</td>
+                                <td>${mark.quizzes}</td>
+                                <td>${mark.daily}</td>
+                                <td><strong class="${isFailed ? 'failed-total' : ''}">${mark.total}</strong></td>
+                                <td><strong class="${isGradeF ? 'failed-grade' : ''}">${mark.grade}</strong></td>
+                            </tr>
+                        `;
+                    });
+                    
+                    year2Section = `
+                        <div class="year-section">
+                            <div class="year-title">Year 2 - Subject Marks</div>
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Subject</th>
+                                        <th>Final<br>(60)</th>
+                                        <th>Midterm<br>(20)</th>
+                                        <th>Quiz<br>(10)</th>
+                                        <th>Daily<br>(10)</th>
+                                        <th>Total</th>
+                                        <th>Grade</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${year2Rows}
+                                </tbody>
+                            </table>
+                            <div class="year-summary">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <div style="text-align: left;">
+                                        <strong>Academic Status:</strong> 
+                                        <span style="color: ${student.year2Status === 'PASS' ? '#16a34a' : '#dc2626'}; font-weight: bold;">
+                                            ${student.year2Status}
+                                        </span>
+                                    </div>
+                                    <div style="text-align: right;">
+                                        <strong>Year 2 Total Credits:</strong> 
+                                        <span style="font-size: 14px; color: ${parseFloat(student.year2Total) >= 25 ? '#16a34a' : '#dc2626'};">
+                                            ${student.year2Total} / 50.00
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                // Build combined total section
+                let combinedSection = '';
+                if ((student.year1Marks && student.year1Marks.length > 0) || (student.year2Marks && student.year2Marks.length > 0)) {
+                    const totalCredits = parseFloat(student.combinedTotal);
+                    const overallStatus = totalCredits >= 50 ? 'PASS' : 'FAIL';
+                    const statusColor = overallStatus === 'PASS' ? '#16a34a' : '#dc2626';
+                    
+                    combinedSection = `
+                        <div style="margin-top: 20px; border: 2px solid #000; overflow: hidden;">
+                            <div style="background: #000; color: #fff; padding: 8px 15px; font-weight: bold; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">
+                                Overall Performance Summary
+                            </div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 15px; background: #f9f9f9;">
+                                <div style="text-align: left;">
+                                    <div style="font-size: 11px; color: #666; margin-bottom: 4px;">FINAL STATUS</div>
+                                    <div style="font-size: 16px; font-weight: bold; color: ${statusColor};">
+                                        ${overallStatus}
+                                    </div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div style="font-size: 11px; color: #666; margin-bottom: 4px;">CUMULATIVE CREDITS</div>
+                                    <div style="font-size: 18px; font-weight: bold; color: ${statusColor};">
+                                        ${student.combinedTotal} / 100.00
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                // Build no data section
+                let noDataSection = '';
+                if ((!student.year1Marks || student.year1Marks.length === 0) && (!student.year2Marks || student.year2Marks.length === 0)) {
+                    noDataSection = '<div class="no-data">No marks available</div>';
+                }
+                
+                // Combine all sections for this student
+                studentSections += `
+                    <div class="student-section">
+                        <div class="student-header">
+                            <h2>${student.name}</h2>
+                            <div class="student-info">
+                                <span>Academic Year: ${student.year}</span>
+                                <span>Class: ${student.class}</span>
+                            </div>
+                        </div>
+                        ${year1Section}
+                        ${year2Section}
+                        ${combinedSection}
+                        ${noDataSection}
+                    </div>
+                `;
+            });
+            
+            console.log('Student sections HTML length:', studentSections.length);
+            
+            // Calculate summary statistics
+            const totalStudents = studentsData.length;
+            const allGrades = studentsData.map(s => parseFloat(s.combinedTotal) || 0);
+            const avgGrade = allGrades.reduce((sum, g) => sum + g, 0) / totalStudents;
+            const maxGrade = Math.max(...allGrades);
+            const minGrade = Math.min(...allGrades);
+            
+            // Get filter description
+            const yearFilter = document.getElementById('reportsFilterYear')?.value || '';
+            const classFilter = document.getElementById('reportsFilterClass')?.value || '';
+            const subjectFilter = document.getElementById('reportsFilterSubject')?.value || '';
+            
+            // Generate comprehensive report description
+            let reportDescription = 'This report presents a comprehensive analytics overview of student academic performance ';
+            let filters = [];
+            
+            if (yearFilter) filters.push(`Year ${yearFilter}`);
+            if (classFilter) filters.push(`${classFilter}`);
+            if (subjectFilter) filters.push(`enrolled in ${subjectFilter}`);
+            
+            if (filters.length > 0) {
+                reportDescription += 'for students in ' + filters.join(', ') + '. ';
+            } else {
+                reportDescription += 'for all students currently enrolled in the academic system. ';
+            }
+            
+            reportDescription += 'The report includes detailed breakdowns of individual student performance across Year 1 and Year 2 subjects, showing comprehensive marks for final exams, midterm exams, quizzes, and daily activities. ';
+            reportDescription += 'Each student section displays their academic status (PASS/FAIL), year-wise total credits, and combined performance metrics. ';
+            reportDescription += 'This document serves as an official academic performance record and can be used for academic evaluation, progress tracking, performance review, and administrative planning. ';
+            reportDescription += `Summary statistics: Average combined grade is ${avgGrade.toFixed(2)} out of 100, with the highest combined grade being ${maxGrade.toFixed(2)} and the lowest combined grade being ${minGrade.toFixed(2)}. `;
+            reportDescription += `Total number of students matching the criteria: ${totalStudents}.`;
+            
+            // Summary box HTML with text-based report summary
+            const summaryBox = `
+                <div class="report-summary">
+                    <h3>REPORT SUMMARY</h3>
+                    <p>${reportDescription}</p>
+                </div>
+            `;
+            
+            // Combine summary with student sections
+            const fullContent = summaryBox + studentSections;
+            
+            // Additional styles specific to Analytics Report
+            const analyticsStyles = `
+                .report-summary {
+                    background: #f5f5f5;
+                    border: 2px solid #000;
+                    padding: 15px;
+                    margin-bottom: 20px;
+                    page-break-inside: avoid;
+                }
+                
+                .report-summary h3 {
+                    margin: 0 0 10px 0;
+                    font-size: 14px;
+                    font-weight: bold;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                
+                .report-summary p {
+                    margin: 0;
+                    font-size: 11px;
+                    line-height: 1.6;
+                    text-align: justify;
+                }
+                
+                .student-section {
+                    page-break-inside: avoid;
+                    page-break-after: always;
+                    margin-bottom: 30px;
+                }
+                
+                .student-section:last-child {
+                    page-break-after: auto;
+                }
+                
+                .student-header {
+                    background: #f5f5f5;
+                    border: 2px solid #000;
+                    padding: 15px;
+                    margin-bottom: 20px;
+                }
+                
+                .student-header h2 {
+                    font-size: 18px;
+                    font-weight: bold;
+                    margin-bottom: 8px;
+                }
+                
+                .student-info {
+                    font-size: 12px;
+                    display: flex;
+                    gap: 20px;
+                }
+                
+                .student-info span {
+                    font-weight: bold;
+                }
+                
+                .year-section {
+                    margin-bottom: 25px;
+                }
+                
+                .year-title {
+                    background: #000;
+                    color: #fff;
+                    padding: 10px 15px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    margin-bottom: 2px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                
+                table {
+                    margin-bottom: 10px;
+                }
+                
+                th {
+                    text-align: center;
+                    font-size: 10px;
+                }
+                
+                td {
+                    text-align: center;
+                    font-size: 11px;
+                }
+                
+                td:first-child {
+                    text-align: left;
+                    font-weight: bold;
+                }
+                
+                .year-summary {
+                    background: #f0f0f0;
+                    border: 1px solid #000;
+                    padding: 12px 15px;
+                    font-size: 12px;
+                }
+                
+                .no-data {
+                    text-align: center;
+                    padding: 30px;
+                    font-style: italic;
+                    color: #666;
+                    background: #f9f9f9;
+                    border: 1px dashed #999;
+                }
+            `;
+            
+            // Use unified print template
+            const printHTML = generatePrintTemplate('Analytics Report', fullContent, analyticsStyles);
+            
+            // IMPORTANT: Write a simple test first to ensure window is writable
+            printWindow.document.write('<h1>Loading...</h1>');
             printWindow.document.close();
             
-            // Wait for the content to load, then print
-            printWindow.onload = function() {
-                printWindow.print();
+            // Clear and write actual content after brief delay
+            setTimeout(() => {
+                console.log('HTML generated, length:', printHTML.length);
+            
+                try {
+                printWindow.document.open();
+                printWindow.document.write(printHTML);
+                printWindow.document.close();
+                console.log('Print window content written successfully');
+            } catch (error) {
+                console.error('Error writing to print window:', error);
+                alert('Error generating print document: ' + error.message);
                 printWindow.close();
-            };
+            }
+            }, 100); // Small delay to ensure window is ready
         }
 
         function expandChart(chartId) {
@@ -6922,43 +8319,43 @@ if ($page == 'reports') {
             const modalHTML = `
                 <div id="editModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
                     <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto;">
-                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Poppins', sans-serif;">✏️ Edit Student</h3>
+                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Roboto', 'Noto Sans', sans-serif;" data-translate="edit_student">Edit Student</h3>
                         <form id="editStudentForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'students', function(){ closeEditModal(); });">
                             <input type="hidden" name="action" value="update_student">
                             <input type="hidden" name="student_id" value="${student.id}">
                             
                             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Full Name *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="full_name">Full Name</span> *</label>
                                     <input type="text" name="student_name" value="${student.name || ''}" required 
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Age *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="age">Age</span> *</label>
                                     <input type="number" name="age" value="${student.age || ''}" min="15" max="30" required 
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Gender *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="gender">Gender</span> *</label>
                                     <select name="gender" required style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                        <option value="">Select Gender</option>
-                                        <option value="Male" ${student.gender === 'Male' ? 'selected' : ''}>Male</option>
-                                        <option value="Female" ${student.gender === 'Female' ? 'selected' : ''}>Female</option>
+                                        <option value="" data-translate="select_gender">Select Gender</option>
+                                        <option value="Male" ${student.gender === 'Male' ? 'selected' : ''} data-translate="male">Male</option>
+                                        <option value="Female" ${student.gender === 'Female' ? 'selected' : ''} data-translate="female">Female</option>
                                     </select>
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Class *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="class">Class</span> *</label>
                                     <select name="class_level" id="editStudentClassSelect" required style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                        <option value="">Select Class</option>
+                                        <option value="" data-translate="select_class">Select Class</option>
                                         <!-- Options will be populated by JavaScript based on year selection -->
                                     </select>
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Academic Year *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="academic_year">Academic Year</span> *</label>
                                     <select name="year" id="editStudentYearSelect" required style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;" onchange="filterEditSubjectsByStudentYear(); updateEditClassOptions();">
-                                        <option value="">Select Year</option>
-                                        <option value="1" ${student.year === '1' || student.year === 1 ? 'selected' : ''}>Year 1</option>
-                                        <option value="2" ${student.year === '2' || student.year === 2 ? 'selected' : ''}>Year 2</option>
+                                        <option value="" data-translate="select_year">Select Year</option>
+                                        <option value="1" ${student.year === '1' || student.year === 1 ? 'selected' : ''} data-translate="year_1">Year 1</option>
+                                        <option value="2" ${student.year === '2' || student.year === 2 ? 'selected' : ''} data-translate="year_2">Year 2</option>
                                     </select>
                                 </div>
                                 <div>
@@ -6967,14 +8364,14 @@ if ($page == 'reports') {
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Phone</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;" data-translate="phone">Phone</label>
                                     <input type="tel" name="phone" value="${student.phone || ''}"
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                             </div>
                             
                             <div style="margin-bottom: 1.5rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">📚 Subject Enrollment</label>
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;" data-translate="subject_enrollment">Subject Enrollment</label>
                                 <div id="editSubjectEnrollmentContainer" style="background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px; padding: 15px; max-height: 200px; overflow-y: auto;">
                                     ${allSubjects.map(subject => `
                                         <div class="edit-subject-item" data-edit-subject-year="${subject.year || ''}" style="margin-bottom: 10px; display: flex; align-items: center; padding: 8px; border-radius: 6px; background: white; border: 1px solid #e9ecef;">
@@ -6988,26 +8385,26 @@ if ($page == 'reports') {
                                             </label>
                                             <div style="display: flex; gap: 8px; align-items: center;">
                                                 <div style="font-size: 0.8rem; color: #666; padding: 2px 8px; background: #f0f9ff; border-radius: 4px;">
-                                                    Year ${subject.year || 'N/A'}
+                                                    <span data-translate="year">Year</span> ${subject.year || 'N/A'}
                                                 </div>
                                                 <div style="font-size: 0.8rem; color: #666; padding: 2px 8px; background: #e3f2fd; border-radius: 4px;">
-                                                    ${subject.credits} credits
+                                                    ${subject.credits} <span data-translate="credits">credits</span>
                                                 </div>
                                             </div>
                                         </div>
                                     `).join('')}
                                 </div>
-                                <small style="color: #666; margin-top: 5px; display: block;">
-                                    📝 Tip: Check/uncheck subjects to enroll or unenroll the student. Unchecking will remove all marks for that subject.
+                                <small style="color: #666; margin-top: 5px; display: block;" data-translate="tip_enroll">
+                                    Tip: Check/uncheck subjects to enroll or unenroll the student. Unchecking will remove all marks for that subject.
                                 </small>
                             </div>
                             
                             <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                                <button type="button" onclick="closeEditModal()" 
+                                <button type="button" onclick="closeEditModal()" data-translate="cancel"
                                         style="padding: 0.75rem 1.5rem; border: 1px solid #ddd; background: white; color: #666; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
                                     Cancel
                                 </button>
-                                <button type="submit" 
+                                <button type="submit" data-translate="update_student"
                                         style="padding: 0.75rem 1.5rem; border: none; background: #3B82F6; color: white; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
                                     Update Student
                                 </button>
@@ -7018,6 +8415,10 @@ if ($page == 'reports') {
             `;
             
             document.body.insertAdjacentHTML('beforeend', modalHTML);
+            
+            // Apply translations to the modal
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            changeLanguage(currentLang);
             
             // Initialize class options based on student's year and set current value
             setTimeout(() => {
@@ -7102,7 +8503,7 @@ if ($page == 'reports') {
             const modalHTML = `
                 <div id="editSubjectModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
                     <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto;">
-                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Poppins', sans-serif;">✏️ Edit Subject</h3>
+                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Roboto', 'Noto Sans', sans-serif;">✏️ Edit Subject</h3>
                         <form id="editSubjectForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'subjects', function(){ closeEditSubjectModal(); });">
                             <input type="hidden" name="action" value="update_subject">
                             <input type="hidden" name="subject_id" value="${subject.id}">
@@ -7223,61 +8624,61 @@ if ($page == 'reports') {
             const modalHTML = `
                 <div id="editMarkModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
                     <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto;">
-                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Poppins', sans-serif;">✏️ Edit Mark</h3>
+                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Roboto', 'Noto Sans', sans-serif;">✏️ <span data-translate="edit_mark">Edit Mark</span></h3>
                         <form id="editMarkForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'marks', function(){ closeEditMarkModal(); });">
                             <input type="hidden" name="action" value="update_mark_record">
                             <input type="hidden" name="mark_id" value="${mark.id}">
                             
                             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
                                 <div style="grid-column: span 2;">
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Student</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;" data-translate="student">Student</label>
                                     <div style="padding: 0.75rem; background: #f8f9fa; border-radius: 6px; color: #666;">
                                         ${mark.student_name}
                                     </div>
                                 </div>
                                 <div style="grid-column: span 2;">
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Subject</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;" data-translate="subject">Subject</label>
                                     <div style="padding: 0.75rem; background: #f8f9fa; border-radius: 6px; color: #666;">
                                         ${mark.subject_name}
                                     </div>
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Final Exam (0-60) *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="final_exam_range">Final Exam (0-60)</span> *</label>
                                     <input type="number" name="final_exam" value="${formatNumber(mark.final_exam)}" min="0" max="60" required 
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Midterm (0-20) *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="midterm_range">Midterm (0-20)</span> *</label>
                                     <input type="number" name="midterm_exam" value="${formatNumber(mark.midterm_exam)}" min="0" max="20" required 
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Quizzes (0-10) *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="quizzes_range">Quizzes (0-10)</span> *</label>
                                     <input type="number" name="quizzes" value="${formatNumber(mark.quizzes)}" min="0" max="10" required 
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                                 <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Daily Activities (0-10) *</label>
+                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="daily_range">Daily Activities (0-10)</span> *</label>
                                     <input type="number" name="daily_activities" value="${formatNumber(mark.daily_activities)}" min="0" max="10" required 
                                            style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                                 <div style="grid-column: span 2;">
                                     <div style="background: #f0f9ff; padding: 1rem; border-radius: 6px; border: 1px solid #0ea5e9;">
-                                        <div style="font-weight: 500; color: #0c4a6e; margin-bottom: 0.5rem;">📊 Mark Calculation</div>
+                                        <div style="font-weight: 500; color: #0c4a6e; margin-bottom: 0.5rem;">📊 <span data-translate="mark_calculation">Mark Calculation</span></div>
                                         <div style="font-size: 0.9rem; color: #0369a1;">
                                             Total = Final Exam + Midterm + Quizzes + Daily Activities<br>
-                                            <strong>Current Total: <span id="totalPreview">${(parseInt(mark.final_exam || 0) + parseInt(mark.midterm_exam || 0) + parseInt(mark.quizzes || 0) + parseInt(mark.daily_activities || 0))}</span>/100</strong>
+                                            <strong><span data-translate="current_total">Current Total</span>: <span id="totalPreview">${(parseInt(mark.final_exam || 0) + parseInt(mark.midterm_exam || 0) + parseInt(mark.quizzes || 0) + parseInt(mark.daily_activities || 0))}</span>/100</strong>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                             
                             <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                                <button type="button" onclick="closeEditMarkModal()" 
+                                <button type="button" onclick="closeEditMarkModal()" data-translate="cancel"
                                         style="padding: 0.75rem 1.5rem; border: 1px solid #ddd; background: white; color: #666; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
                                     Cancel
                                 </button>
-                                <button type="submit" 
+                                <button type="submit" data-translate="update_mark"
                                         style="padding: 0.75rem 1.5rem; border: none; background: #3B82F6; color: white; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
                                     Update Mark
                                 </button>
@@ -7288,6 +8689,10 @@ if ($page == 'reports') {
             `;
             
             document.body.insertAdjacentHTML('beforeend', modalHTML);
+            
+            // Apply translations to the modal
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            changeLanguage(currentLang);
             
             // Add real-time total calculation and input validation
             const inputs = document.querySelectorAll('#editMarkModal input[type="number"]');
@@ -7362,16 +8767,104 @@ if ($page == 'reports') {
             }
         });
 
+        // Update Marks Subject Filter based on Year
+        function updateMarksSubjectFilter() {
+            const yearFilter = document.getElementById('filterMarksYear').value;
+            const subjectSelect = document.getElementById('filterMarksSubject');
+            const currentValue = subjectSelect.value;
+            
+            // Clear current options except "All Subjects"
+            subjectSelect.innerHTML = '<option value="">All Subjects</option>';
+            
+            // Get all subjects from the data
+            if (typeof allSubjects !== 'undefined' && allSubjects) {
+                allSubjects.forEach(subject => {
+                    // If year filter is set, only show subjects for that year
+                    if (yearFilter === '' || subject.year == yearFilter) {
+                        const option = document.createElement('option');
+                        option.value = subject.subject_name;
+                        option.textContent = subject.subject_name;
+                        subjectSelect.appendChild(option);
+                    }
+                });
+            }
+            
+            // Restore selection if it's still valid
+            if (currentValue) {
+                const options = Array.from(subjectSelect.options);
+                const matchingOption = options.find(opt => opt.value === currentValue);
+                if (matchingOption) {
+                    subjectSelect.value = currentValue;
+                } else {
+                    subjectSelect.value = '';
+                }
+            }
+        }
+
+        // Update Reports Subject Filter based on Year
+        function updateReportsSubjectFilter() {
+            const yearFilter = document.getElementById('reportsFilterYear').value;
+            const subjectSelect = document.getElementById('reportsFilterSubject');
+            const currentValue = subjectSelect.value;
+            
+            // Clear current options except "All Subjects"
+            subjectSelect.innerHTML = '<option value="">All Subjects</option>';
+            
+            // Get all subjects from the data
+            if (typeof allSubjects !== 'undefined' && allSubjects) {
+                allSubjects.forEach(subject => {
+                    // If year filter is set, only show subjects for that year
+                    if (yearFilter === '' || subject.year == yearFilter) {
+                        const option = document.createElement('option');
+                        option.value = subject.subject_name;
+                        option.textContent = subject.subject_name;
+                        subjectSelect.appendChild(option);
+                    }
+                });
+            }
+            
+            // Restore selection if it's still valid
+            if (currentValue) {
+                const options = Array.from(subjectSelect.options);
+                const matchingOption = options.find(opt => opt.value === currentValue);
+                if (matchingOption) {
+                    subjectSelect.value = currentValue;
+                } else {
+                    subjectSelect.value = '';
+                }
+            }
+        }
+
+        // Initialize subject filters on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initialize marks subject filter if on marks page
+            if (document.getElementById('filterMarksSubject')) {
+                updateMarksSubjectFilter();
+                // Run initial filter to show summary
+                setTimeout(() => filterMarks(), 100);
+            }
+            
+            // Initialize reports subject filter if on reports page
+            if (document.getElementById('reportsFilterSubject')) {
+                updateReportsSubjectFilter();
+                // Run initial filter to show summary
+                setTimeout(() => filterReportsTable(), 100);
+            }
+        });
+
         // Marks filtering and search functions
         function filterMarks() {
             const searchValue = document.getElementById('searchMarks').value.toLowerCase();
             const yearFilter = document.getElementById('filterMarksYear').value;
             const classFilter = document.getElementById('filterMarksClass').value;
+            const subjectFilter = document.getElementById('filterMarksSubject').value;
+            const sortByGrade = document.getElementById('sortMarksByGrade').value;
             
             const table = document.getElementById('marksTable');
-            const rows = table.querySelectorAll('tbody tr.student-main-row');
+            const rows = Array.from(table.querySelectorAll('tbody tr.student-main-row'));
             
             let visibleCount = 0;
+            let visibleRows = [];
             
             rows.forEach(row => {
                 const studentId = row.getAttribute('data-student-id');
@@ -7387,31 +8880,102 @@ if ($page == 'reports') {
                 const rowYear = row.getAttribute('data-year');
                 const rowClass = row.getAttribute('data-class');
                 
+                // Get final grade for sorting
+                const finalGradeCell = cells[4]; // Final Grade column
+                const finalGrade = parseFloat(finalGradeCell.textContent) || 0;
+                
+                // Check if student has the filtered subject
+                let hasSubject = true;
+                if (subjectFilter && detailsRow) {
+                    const subjectRows = detailsRow.querySelectorAll('.subject-marks-table tbody tr');
+                    hasSubject = false;
+                    subjectRows.forEach(subjRow => {
+                        const subjCells = subjRow.querySelectorAll('td');
+                        if (subjCells.length > 0) {
+                            const subjectName = subjCells[0].textContent.trim();
+                            if (subjectName === subjectFilter) {
+                                hasSubject = true;
+                            }
+                        }
+                    });
+                }
+                
                 // Check search criteria
                 const matchesSearch = searchValue === '' || studentName.includes(searchValue);
                 const matchesYear = yearFilter === '' || rowYear === yearFilter;
                 const matchesClass = classFilter === '' || rowClass === classFilter;
+                const matchesSubject = subjectFilter === '' || hasSubject;
                 
                 // Show/hide row based on all criteria
-                if (matchesSearch && matchesYear && matchesClass) {
+                if (matchesSearch && matchesYear && matchesClass && matchesSubject) {
                     row.style.display = '';
                     if (detailsRow) detailsRow.style.display = '';
                     visibleCount++;
+                    visibleRows.push({ row, detailsRow, finalGrade });
                 } else {
                     row.style.display = 'none';
                     if (detailsRow) detailsRow.style.display = 'none';
                 }
             });
             
+            // Apply sorting if selected
+            if (sortByGrade && visibleRows.length > 0) {
+                visibleRows.sort((a, b) => {
+                    if (sortByGrade === 'asc') {
+                        return a.finalGrade - b.finalGrade;
+                    } else {
+                        return b.finalGrade - a.finalGrade;
+                    }
+                });
+                
+                // Reorder rows in the table
+                const tbody = table.querySelector('tbody');
+                visibleRows.forEach(item => {
+                    tbody.appendChild(item.row);
+                    if (item.detailsRow) {
+                        tbody.appendChild(item.detailsRow);
+                    }
+                });
+            }
+            
             // Update results counter
             updateMarksCounter(visibleCount);
+            
+            // Update summary statistics
+            updateMarksSummary(visibleRows);
+        }
+
+        function updateMarksSummary(visibleRows) {
+            const summaryBox = document.getElementById('marksSummaryBox');
+            if (!summaryBox) return;
+            
+            if (visibleRows.length === 0) {
+                summaryBox.style.display = 'none';
+                return;
+            }
+            
+            summaryBox.style.display = 'block';
+            
+            const grades = visibleRows.map(item => item.finalGrade);
+            const total = visibleRows.length;
+            const avgGrade = grades.reduce((sum, grade) => sum + grade, 0) / total;
+            const maxGrade = Math.max(...grades);
+            const minGrade = Math.min(...grades);
+            
+            document.getElementById('marksTotalStudents').textContent = total;
+            document.getElementById('marksAvgGrade').textContent = avgGrade.toFixed(2);
+            document.getElementById('marksMaxGrade').textContent = maxGrade.toFixed(2);
+            document.getElementById('marksMinGrade').textContent = minGrade.toFixed(2);
         }
 
         function clearMarksFilters() {
             document.getElementById('searchMarks').value = '';
             document.getElementById('filterMarksYear').value = '';
             document.getElementById('filterMarksClass').value = '';
+            document.getElementById('filterMarksSubject').value = '';
+            document.getElementById('sortMarksByGrade').value = '';
             
+            updateMarksSubjectFilter();
             filterMarks();
         }
 
@@ -7561,10 +9125,13 @@ if ($page == 'reports') {
             const searchValue = document.getElementById('reportsSearchStudent').value.toLowerCase();
             const yearFilter = document.getElementById('reportsFilterYear')?.value || '';
             const classFilter = document.getElementById('reportsFilterClass')?.value || '';
+            const subjectFilter = document.getElementById('reportsFilterSubject')?.value || '';
+            const sortByGrade = document.getElementById('sortReportsByGrade')?.value || '';
             
             const table = document.getElementById('reportsTable');
-            const rows = table.querySelectorAll('tbody tr.student-main-row');
+            const rows = Array.from(table.querySelectorAll('tbody tr.student-main-row'));
             let visibleCount = 0;
+            let visibleRows = [];
 
             rows.forEach(row => {
                 const studentId = row.getAttribute('data-student-id');
@@ -7576,6 +9143,10 @@ if ($page == 'reports') {
                 const studentName = cells[0].textContent.toLowerCase();
                 const yearText = cells[1].textContent;
                 const classLevel = cells[2].textContent.trim();
+                
+                // Get final grade for sorting
+                const finalGradeCell = cells[4]; // Final Grade column
+                const finalGrade = parseFloat(finalGradeCell.textContent) || 0;
                 
                 let matches = true;
                 
@@ -7597,18 +9168,83 @@ if ($page == 'reports') {
                     matches = false;
                 }
                 
+                // Subject filter - check if student has the subject in their marks
+                if (subjectFilter && detailsRow) {
+                    let hasSubject = false;
+                    const subjectRows = detailsRow.querySelectorAll('.subject-marks-table tbody tr');
+                    subjectRows.forEach(subjRow => {
+                        const subjCells = subjRow.querySelectorAll('td');
+                        if (subjCells.length > 0) {
+                            const subjectName = subjCells[0].textContent.trim();
+                            if (subjectName === subjectFilter) {
+                                hasSubject = true;
+                            }
+                        }
+                    });
+                    if (!hasSubject) {
+                        matches = false;
+                    }
+                }
+                
                 if (matches) {
                     row.style.display = '';
                     if (detailsRow) detailsRow.style.display = '';
                     visibleCount++;
+                    visibleRows.push({ row, detailsRow, finalGrade });
                 } else {
                     row.style.display = 'none';
                     if (detailsRow) detailsRow.style.display = 'none';
                 }
             });
             
+            // Apply sorting if selected
+            if (sortByGrade && visibleRows.length > 0) {
+                visibleRows.sort((a, b) => {
+                    if (sortByGrade === 'asc') {
+                        return a.finalGrade - b.finalGrade;
+                    } else {
+                        return b.finalGrade - a.finalGrade;
+                    }
+                });
+                
+                // Reorder rows in the table
+                const tbody = table.querySelector('tbody');
+                visibleRows.forEach(item => {
+                    tbody.appendChild(item.row);
+                    if (item.detailsRow) {
+                        tbody.appendChild(item.detailsRow);
+                    }
+                });
+            }
+            
             // Update results counter
             updateReportsCounter(visibleCount);
+            
+            // Update summary statistics
+            updateReportsSummary(visibleRows);
+        }
+
+        function updateReportsSummary(visibleRows) {
+            const summaryBox = document.getElementById('reportsSummaryBox');
+            if (!summaryBox) return;
+            
+            if (visibleRows.length === 0) {
+                summaryBox.style.display = 'none';
+                return;
+            }
+            
+            summaryBox.style.display = 'block';
+            
+            const grades = visibleRows.map(item => item.finalGrade);
+            const total = visibleRows.length;
+            const avgGrade = grades.reduce((sum, grade) => sum + grade, 0) / total;
+            const maxGrade = Math.max(...grades);
+            const minGrade = Math.min(...grades);
+            
+            document.getElementById('reportsTotalStudents').textContent = total;
+            document.getElementById('reportsAvgGrade').textContent = avgGrade.toFixed(2);
+            document.getElementById('reportsMaxGrade').textContent = maxGrade.toFixed(2);
+            document.getElementById('reportsMinGrade').textContent = minGrade.toFixed(2);
         }
 
         function clearReportsFilters() {
@@ -7619,6 +9255,13 @@ if ($page == 'reports') {
             if (document.getElementById('reportsFilterClass')) {
                 document.getElementById('reportsFilterClass').value = '';
             }
+            if (document.getElementById('reportsFilterSubject')) {
+                document.getElementById('reportsFilterSubject').value = '';
+            }
+            if (document.getElementById('sortReportsByGrade')) {
+                document.getElementById('sortReportsByGrade').value = '';
+            }
+            updateReportsSubjectFilter();
             filterReportsTable();
         }
 
@@ -7629,12 +9272,16 @@ if ($page == 'reports') {
                 const tableContainer = document.querySelector('#reportsTable').parentNode;
                 counter = document.createElement('div');
                 counter.id = 'reportsCounter';
-                counter.style.cssText = 'text-align: right; margin-top: 0.5rem; font-size: 0.9rem; color: #666;';
-                tableContainer.appendChild(counter);
+                counter.style.cssText = 'text-align: right; margin-bottom: 1rem; font-size: 0.95rem; color: var(--text-color); font-weight: 500; padding: 0.5rem 1rem; background: var(--card-bg); border-radius: 6px; display: inline-block; float: right;';
+                // Insert at the top (before the table container)
+                tableContainer.insertBefore(counter, tableContainer.firstChild);
             }
             
             const total = document.querySelectorAll('#reportsTable tbody tr.student-main-row').length;
-            counter.textContent = `Showing ${count} of ${total} students`;
+            const showingText = getTranslation('showing') || 'Showing';
+            const ofText = getTranslation('of') || 'of';
+            const studentsText = getTranslation('students') || 'students';
+            counter.textContent = `${showingText} ${count} ${ofText} ${total} ${studentsText}`;
         }
 
         function updateMarksCounter(count) {
@@ -7644,12 +9291,16 @@ if ($page == 'reports') {
                 const tableContainer = document.querySelector('#marksTable').parentNode;
                 counter = document.createElement('div');
                 counter.id = 'marksCounter';
-                counter.style.cssText = 'text-align: right; margin-top: 0.5rem; font-size: 0.9rem; color: #666;';
-                tableContainer.appendChild(counter);
+                counter.style.cssText = 'text-align: right; margin-bottom: 1rem; font-size: 0.95rem; color: var(--text-color); font-weight: 500; padding: 0.5rem 1rem; background: var(--card-bg); border-radius: 6px; display: inline-block; float: right;';
+                // Insert at the top (before the table container)
+                tableContainer.insertBefore(counter, tableContainer.firstChild);
             }
             
             const total = document.querySelectorAll('#marksTable tbody tr.student-main-row').length;
-            counter.textContent = `Showing ${count} of ${total} students`;
+            const showingText = getTranslation('showing') || 'Showing';
+            const ofText = getTranslation('of') || 'of';
+            const studentsText = getTranslation('students') || 'students';
+            counter.textContent = `${showingText} ${count} ${ofText} ${total} ${studentsText}`;
         }
 
         // Initialize marks counter on page load
@@ -7685,6 +9336,9 @@ if ($page == 'reports') {
             const enrollmentFilter = document.getElementById('filterStudentEnrollment').value;
             const yearFilter = document.getElementById('filterStudentYear').value;
             
+            // Update class dropdown based on year filter
+            updateClassFilterOptions(yearFilter);
+            
             const table = document.getElementById('studentsTable');
             const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
             
@@ -7701,9 +9355,9 @@ if ($page == 'reports') {
                 const studentGender = cells[3].textContent.trim();
                 const studentClass = cells[4].textContent.trim();
                 const studentYear = cells[5].textContent.trim();
-                const studentEmail = cells[6].textContent.toLowerCase();
-                const studentPhone = cells[7].textContent.toLowerCase();
-                const studentSubjects = cells[8].textContent.trim();
+                const studentEmail = cells[7].textContent.toLowerCase();
+                const studentPhone = cells[8].textContent.toLowerCase();
+                const studentSubjects = cells[9].textContent.trim();
                 
                 // Check search criteria
                 const matchesSearch = searchValue === '' || 
@@ -7758,6 +9412,43 @@ if ($page == 'reports') {
             // Update results counter
             updateStudentsCounter(visibleCount);
         }
+        
+        // Update class filter options based on selected year
+        function updateClassFilterOptions(yearFilter) {
+            const classSelect = document.getElementById('filterStudentClass');
+            const currentValue = classSelect.value;
+            
+            // Clear existing options except "All Classes"
+            classSelect.innerHTML = '<option value="" data-translate="all_classes">All Classes</option>';
+            
+            if (yearFilter === '') {
+                // Show all classes if no year selected
+                const allClasses = ['1A', '1B', '1C', '2A', '2B', '2C'];
+                allClasses.forEach(cls => {
+                    const option = document.createElement('option');
+                    option.value = 'Class ' + cls;
+                    option.textContent = 'Class ' + cls;
+                    classSelect.appendChild(option);
+                });
+            } else {
+                // Show only classes for the selected year
+                const classes = ['A', 'B', 'C'];
+                classes.forEach(cls => {
+                    const option = document.createElement('option');
+                    const classValue = 'Class ' + yearFilter + cls;
+                    option.value = classValue;
+                    option.textContent = classValue;
+                    classSelect.appendChild(option);
+                });
+            }
+            
+            // Restore previous value if it's still valid
+            if (currentValue && Array.from(classSelect.options).some(opt => opt.value === currentValue)) {
+                classSelect.value = currentValue;
+            } else {
+                classSelect.value = ''; // Reset to "All Classes"
+            }
+        }
 
         function clearStudentsFilters() {
             document.getElementById('searchStudents').value = '';
@@ -7798,10 +9489,13 @@ if ($page == 'reports') {
                 const tableContainer = document.querySelector('#subjectsTable').parentNode;
                 counter = document.createElement('div');
                 counter.id = 'subjectsCounter';
-                counter.style.cssText = 'text-align: right; margin-top: 0.5rem; font-size: 0.9rem; color: #666;';
-                tableContainer.appendChild(counter);
+                counter.style.cssText = 'text-align: right; margin-bottom: 1rem; font-size: 0.95rem; color: var(--text-color); font-weight: 500; padding: 0.5rem 1rem; background: var(--card-bg); border-radius: 6px; display: inline-block; float: right;';
+                // Insert at the top (before the table container)
+                tableContainer.insertBefore(counter, tableContainer.firstChild);
             }
-            counter.textContent = `Showing ${count} subjects`;
+            const showingText = getTranslation('showing') || 'Showing';
+            const subjectsText = getTranslation('subjects') || 'subjects';
+            counter.textContent = `${showingText} ${count} ${subjectsText}`;
         }
 
         // Filter subjects in enrollment section based on student's academic year
@@ -7809,6 +9503,8 @@ if ($page == 'reports') {
             const selectedYear = document.getElementById('studentYearSelect').value;
             const subjectItems = document.querySelectorAll('.subject-item');
             const container = document.getElementById('subjectEnrollmentContainer');
+            const selectAllContainer = document.getElementById('selectAllSubjectsContainer');
+            const selectAllCheckbox = document.getElementById('selectAllSubjects');
             
             // Remove existing message
             const existingMessage = container.querySelector('.no-subjects-message');
@@ -7817,7 +9513,7 @@ if ($page == 'reports') {
             }
             
             if (selectedYear === '') {
-                // Hide all subjects when no year is selected
+                // Hide all subjects and select all checkbox when no year is selected
                 subjectItems.forEach(item => {
                     item.style.display = 'none';
                     // Uncheck all subjects
@@ -7826,6 +9522,14 @@ if ($page == 'reports') {
                         checkbox.checked = false;
                     }
                 });
+                
+                // Hide select all checkbox
+                if (selectAllContainer) {
+                    selectAllContainer.style.display = 'none';
+                }
+                if (selectAllCheckbox) {
+                    selectAllCheckbox.checked = false;
+                }
                 
                 // Show message to select year first
                 const message = document.createElement('div');
@@ -7854,6 +9558,19 @@ if ($page == 'reports') {
                 }
             });
             
+            // Show/hide select all checkbox based on visible subjects
+            if (visibleCount > 0 && selectAllContainer) {
+                selectAllContainer.style.display = 'block';
+                // Reset select all checkbox
+                if (selectAllCheckbox) {
+                    selectAllCheckbox.checked = false;
+                }
+            } else {
+                if (selectAllContainer) {
+                    selectAllContainer.style.display = 'none';
+                }
+            }
+            
             // Show message if no subjects match the selected year
             if (visibleCount === 0) {
                 const message = document.createElement('div');
@@ -7862,6 +9579,22 @@ if ($page == 'reports') {
                 message.textContent = `No subjects available for Year ${selectedYear}`;
                 container.appendChild(message);
             }
+        }
+
+        // Toggle all subject checkboxes
+        function toggleAllSubjects(checkbox) {
+            const subjectItems = document.querySelectorAll('.subject-item');
+            const isChecked = checkbox.checked;
+            
+            subjectItems.forEach(item => {
+                // Only toggle visible subjects (those matching the selected year)
+                if (item.style.display !== 'none') {
+                    const subjectCheckbox = item.querySelector('input[type="checkbox"]');
+                    if (subjectCheckbox) {
+                        subjectCheckbox.checked = isChecked;
+                    }
+                }
+            });
         }
 
         // Filter subjects in edit modal based on student's academic year
@@ -7956,25 +9689,34 @@ if ($page == 'reports') {
             const currentValue = classSelect.value;
             
             // Clear current options except the default
-            classSelect.innerHTML = '<option value="">Select Class</option>';
+            classSelect.innerHTML = '<option value="" data-translate="select_class">Select Class</option>';
             
             if (selectedYear === '1') {
                 classSelect.innerHTML += `
-                    <optgroup label="Year 1">
-                        <option value="1A">Year 1 - Class A</option>
-                        <option value="1B">Year 1 - Class B</option>
-                        <option value="1C">Year 1 - Class C</option>
+                    <optgroup label="${getTranslation('year_1')}">
+                        <option value="1A" data-translate="year_1_class_a">Year 1 - Class A</option>
+                        <option value="1B" data-translate="year_1_class_b">Year 1 - Class B</option>
+                        <option value="1C" data-translate="year_1_class_c">Year 1 - Class C</option>
                     </optgroup>
                 `;
             } else if (selectedYear === '2') {
                 classSelect.innerHTML += `
-                    <optgroup label="Year 2">
-                        <option value="2A">Year 2 - Class A</option>
-                        <option value="2B">Year 2 - Class B</option>
-                        <option value="2C">Year 2 - Class C</option>
+                    <optgroup label="${getTranslation('year_2')}">
+                        <option value="2A" data-translate="year_2_class_a">Year 2 - Class A</option>
+                        <option value="2B" data-translate="year_2_class_b">Year 2 - Class B</option>
+                        <option value="2C" data-translate="year_2_class_c">Year 2 - Class C</option>
                     </optgroup>
                 `;
             }
+            
+            // Apply translations to the newly added options
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            classSelect.querySelectorAll('[data-translate]').forEach(element => {
+                const key = element.getAttribute('data-translate');
+                if (translations[currentLang] && translations[currentLang][key]) {
+                    element.textContent = translations[currentLang][key];
+                }
+            });
             
             // Try to maintain selection if it matches the new year
             if (currentValue && currentValue.startsWith(selectedYear)) {
@@ -8041,12 +9783,16 @@ if ($page == 'reports') {
                 const tableContainer = document.querySelector('#studentsTable').parentNode;
                 counter = document.createElement('div');
                 counter.id = 'studentsCounter';
-                counter.style.cssText = 'text-align: right; margin-top: 0.5rem; font-size: 0.9rem; color: #666;';
-                tableContainer.appendChild(counter);
+                counter.style.cssText = 'text-align: right; margin-bottom: 1rem; font-size: 0.95rem; color: var(--text-color); font-weight: 500; padding: 0.5rem 1rem; background: var(--card-bg); border-radius: 6px; display: inline-block; float: right;';
+                // Insert at the top (before the table container)
+                tableContainer.insertBefore(counter, tableContainer.firstChild);
             }
             
             const total = document.querySelectorAll('#studentsTable tbody tr').length;
-            counter.textContent = `Showing ${count} of ${total} students`;
+            const showingText = getTranslation('showing') || 'Showing';
+            const ofText = getTranslation('of') || 'of';
+            const studentsText = getTranslation('students') || 'students';
+            counter.textContent = `${showingText} ${count} ${ofText} ${total} ${studentsText}`;
         }
 
         // Language Translation System
@@ -8083,6 +9829,7 @@ if ($page == 'reports') {
                 delete_selected: "Delete Selected",
                 actions: "Actions",
                 enroll_in_subjects: "Enroll in Subjects",
+                select_all_subjects: "Select All Subjects",
                 please_select_year_first: "Please select an Academic Year first to see available subjects",
                 no_subjects_available: "No subjects available. Please add subjects first.",
                 reports_title: "Student Management System - Reports Dashboard",
@@ -8181,6 +9928,7 @@ if ($page == 'reports') {
                 all_ages: "All Ages",
                 all_students: "All Students",
                 clear_filters: "🔄 Clear Filters",
+                collapse_all: "📁 Collapse All",
                 search: "Search",
                 search_student: "Search Student",
                 search_subject: "Search Subject",
@@ -8207,10 +9955,58 @@ if ($page == 'reports') {
                 daily: "Daily",
                 total: "Total",
                 final_grade: "Final Grade",
+                graduation_grade: "Graduation Grade",
+                students_count: "students",
+                showing: "Showing",
+                of: "of",
+                students: "students",
+                subjects: "subjects",
+                manage_marks: "Manage Marks",
+                subject_marks_title: "Subject Marks - Click Edit to modify",
+                final_exam: "Final (60)",
+                midterm_exam: "Midterm (20)",
+                quiz: "Quiz (10)",
+                daily_activities: "Daily (10)",
                 select_student: "Select Student",
+                edit: "Edit",
+                delete: "Delete",
+                view_details: "View Details",
+                subject_marks: "Subject Marks",
+                total_credits: "Total Credits",
+                year_1_student: "Year 1 Student",
+                year_2_student: "Year 2 Student",
+                unknown: "Unknown",
+                male: "Male",
+                female: "Female",
+                n_a: "N/A",
+                year: "Year",
+                edit_student: "Edit Student",
+                full_name: "Full Name",
+                select_gender: "Select Gender",
+                select_class: "Select Class",
+                cancel: "Cancel",
+                update_student: "Update Student",
+                subject_enrollment: "Subject Enrollment",
+                credits: "credits",
+                tip_enroll: "Tip: Check/uncheck subjects to enroll or unenroll the student. Unchecking will remove all marks for that subject.",
                 class_a: "Class A",
                 class_b: "Class B", 
                 class_c: "Class C",
+                year_1_class_a: "Year 1 - Class A",
+                year_1_class_b: "Year 1 - Class B",
+                year_1_class_c: "Year 1 - Class C",
+                year_2_class_a: "Year 2 - Class A",
+                year_2_class_b: "Year 2 - Class B",
+                year_2_class_c: "Year 2 - Class C",
+                edit_mark: "Edit Mark",
+                mark_calculation: "Mark Calculation",
+                current_total: "Current Total",
+                update_mark: "Update Mark",
+                analytics_report: "Analytics Report",
+                generated_on: "Generated on",
+                no_data_to_print: "No data to print",
+                no_marks_available: "No marks available",
+                average: "Average",
                 time: "Time",
                 sunday: "Sunday",
                 monday: "Monday",
@@ -8269,6 +10065,7 @@ if ($page == 'reports') {
                 delete_selected: "حذف المحدد",
                 actions: "الإجراءات",
                 enroll_in_subjects: "التسجيل في المواد",
+                select_all_subjects: "اختر جميع المواد",
                 please_select_year_first: "يرجى اختيار السنة الدراسية أولاً لرؤية المواد المتاحة",
                 no_subjects_available: "لا توجد مواد متاحة. يرجى إضافة المواد أولاً.",
                 reports_title: "نظام إدارة الطلاب - لوحة التقارير",
@@ -8363,6 +10160,7 @@ if ($page == 'reports') {
                 all_ages: "جميع الأعمار",
                 all_students: "جميع الطلاب",
                 clear_filters: "🔄 مسح التصفيات",
+                collapse_all: "📁 طي الكل",
                 search: "البحث",
                 search_student: "البحث عن طالب",
                 search_subject: "البحث عن مادة",
@@ -8389,7 +10187,40 @@ if ($page == 'reports') {
                 daily: "اليومي",
                 total: "الإجمالي",
                 final_grade: "الدرجة النهائية",
+                graduation_grade: "درجة التخرج",
+                students_count: "طلاب",
+                showing: "عرض",
+                of: "من",
+                students: "طلاب",
+                subjects: "المواد",
+                manage_marks: "إدارة الدرجات",
+                subject_marks_title: "درجات المواد - انقر على تعديل للتغيير",
+                final_exam: "النهائي (60)",
+                midterm_exam: "منتصف الفصل (20)",
+                quiz: "الاختبار (10)",
+                daily_activities: "اليومي (10)",
                 select_student: "اختر الطالب",
+                edit: "تعديل",
+                delete: "حذف",
+                view_details: "عرض التفاصيل",
+                subject_marks: "درجات المواد",
+                total_credits: "مجموع النقاط",
+                year_1_student: "طالب السنة الأولى",
+                year_2_student: "طالب السنة الثانية",
+                unknown: "غير معروف",
+                male: "ذكر",
+                female: "أنثى",
+                n_a: "غير متوفر",
+                year: "السنة",
+                edit_student: "تعديل الطالب",
+                full_name: "الاسم الكامل",
+                select_gender: "اختر الجنس",
+                select_class: "اختر الصف",
+                cancel: "إلغاء",
+                update_student: "تحديث الطالب",
+                subject_enrollment: "تسجيل المواد",
+                credits: "نقاط",
+                tip_enroll: "نصيحة: حدد/ألغِ تحديد المواد لتسجيل الطالب أو إلغاء تسجيله. إلغاء التحديد سيزيل جميع الدرجات لتلك المادة.",
                 select_subject: "اختر المادة",
                 final_exam_range: "الامتحان النهائي (0-60)",
                 midterm_range: "منتصف الفصل (0-20)",
@@ -8417,6 +10248,21 @@ if ($page == 'reports') {
                 class_a: "A کلاس",
                 class_b: "B کلاس",
                 class_c: "C کلاس",
+                year_1_class_a: "السنة الأولى - کلاس A",
+                year_1_class_b: "السنة الأولى - کلاس B",
+                year_1_class_c: "السنة الأولى - کلاس C",
+                year_2_class_a: "السنة الثانية - کلاس A",
+                year_2_class_b: "السنة الثانية - کلاس B",
+                year_2_class_c: "السنة الثانية - کلاس C",
+                edit_mark: "تعديل الدرجة",
+                mark_calculation: "حساب الدرجة",
+                current_total: "المجموع الحالي",
+                update_mark: "تحديث الدرجة",
+                analytics_report: "تقرير التحليلات",
+                generated_on: "تم الإنشاء في",
+                no_data_to_print: "لا توجد بيانات للطباعة",
+                no_marks_available: "لا توجد درجات متاحة",
+                average: "المعدل",
                 time: "الوقت",
                 sunday: "الأحد",
                 monday: "الاثنين",
@@ -8456,6 +10302,7 @@ if ($page == 'reports') {
                 delete_selected: "هەڵبژاردەکان بسڕەوە",
                 actions: "کردارەکان",
                 enroll_in_subjects: "لە وانەکاندا تۆمارکردن",
+                select_all_subjects: "هەموو وانەکان هەڵبژێرە",
                 please_select_year_first: "تکایە یەکەم جار ساڵی خوێندن هەڵبژێرە بۆ بینینی وانە بەردەستەکان",
                 no_subjects_available: "هیچ وانەیەک بەردەست نییە. تکایە یەکەم جار وانەکان زیاد بکە.",
                 reports_title: "سیستەمی بەڕێوەبردنی قوتابییان - داشبۆردی ڕاپۆرتەکان",
@@ -8550,6 +10397,7 @@ if ($page == 'reports') {
                 all_ages: "هەموو تەمەنەکان",
                 all_students: "هەموو قوتابییەکان",
                 clear_filters: "🔄 پاڵاوتنەکان بسڕەوە",
+                collapse_all: "📁 هەموو داخستن",
                 search: "گەڕان",
                 search_student: "گەڕان بەدوای قوتابی",
                 search_subject: "گەڕان بەدوای وانە",
@@ -8576,7 +10424,40 @@ if ($page == 'reports') {
                 daily: "ڕۆژانە",
                 total: "گشتی",
                 final_grade: "نمرەی کۆتایی",
+                graduation_grade: "نمرەی دەرچوون",
+                students_count: "قوتابیان",
+                showing: "پیشاندان",
+                of: "لە",
+                students: "قوتابیان",
+                subjects: "وانەکان",
+                manage_marks: "بەڕێوەبردنی نمرەکان",
+                subject_marks_title: "نمرەکانی وانەکان - کرتە لە دەستکاری بکە",
+                final_exam: "کۆتایی (60)",
+                midterm_exam: "ناوەڕاست (20)",
+                quiz: "تاقیکردنەوە (10)",
+                daily_activities: "ڕۆژانە (10)",
                 select_student: "قوتابی هەڵبژێرە",
+                edit: "دەستکاری",
+                delete: "سڕینەوە",
+                view_details: "پیشاندانی وردەکاری",
+                subject_marks: "نمرەکانی وانەکان",
+                total_credits: "کۆی خاڵەکان",
+                year_1_student: "قوتابی ساڵی یەکەم",
+                year_2_student: "قوتابی ساڵی دووەم",
+                unknown: "نەزانراو",
+                male: "نێر",
+                female: "مێ",
+                n_a: "بەردەست نییە",
+                year: "ساڵ",
+                edit_student: "دەستکاری قوتابی",
+                full_name: "ناوی تەواو",
+                select_gender: "ڕەگەز هەڵبژێرە",
+                select_class: "پۆل هەڵبژێرە",
+                cancel: "پاشگەزبوونەوە",
+                update_student: "نوێکردنەوەی قوتابی",
+                subject_enrollment: "تۆماری وانەکان",
+                credits: "خاڵ",
+                tip_enroll: "تێبینی: نیشانە بکە/لابە بۆ تۆمارکردن یان لابردنی تۆماری قوتابی. لابردنی نیشانە هەموو نمرەکانی ئەو وانەیە دەسڕێتەوە.",
                 select_subject: "وانە هەڵبژێرە",
                 final_exam_range: "تاقیکردنەوەی کۆتایی (0-60)",
                 midterm_range: "ناوەڕاست (0-20)",
@@ -8604,6 +10485,21 @@ if ($page == 'reports') {
                 class_a: "A کلاس",
                 class_b: "B کلاس",
                 class_c: "C کلاس",
+                year_1_class_a: "ساڵی یەکەم - کلاسی A",
+                year_1_class_b: "ساڵی یەکەم - کلاسی B",
+                year_1_class_c: "ساڵی یەکەم - کلاسی C",
+                year_2_class_a: "ساڵی دووەم - کلاسی A",
+                year_2_class_b: "ساڵی دووەم - کلاسی B",
+                year_2_class_c: "ساڵی دووەم - کلاسی C",
+                edit_mark: "دەستکاری نمرە",
+                mark_calculation: "ژمێریاری نمرە",
+                current_total: "کۆی ئێستا",
+                update_mark: "نوێکردنەوەی نمرە",
+                analytics_report: "ڕاپۆرتی شیکاری",
+                generated_on: "دروستکراوە لە",
+                no_data_to_print: "هیچ زانیاریەک نییە بۆ چاپکردن",
+                no_marks_available: "هیچ نمرەیەک بەردەست نییە",
+                average: "تێکڕا",
                 time: "کات",
                 sunday: "یەکشەممە",
                 monday: "دووشەممە",
@@ -8717,6 +10613,11 @@ if ($page == 'reports') {
             };
             
             document.querySelectorAll('.chart-title, .section-title').forEach(title => {
+                // Skip if the title has child elements with data-translate (our new format)
+                if (title.querySelector('[data-translate]')) {
+                    return; // Let the normal translation handle it
+                }
+                
                 const currentText = title.textContent.trim();
                 for (const [english, key] of Object.entries(chartTitles)) {
                     if (currentText.includes(english.split(' ').slice(-1)[0])) {
@@ -9221,7 +11122,7 @@ if ($page == 'reports') {
         }
 
         function handleMarkAction(action, markId) {
-            if (action === 'delete_mark' && !confirm('Are you sure you want to delete this mark?')) {
+            if (action === 'delete_mark' && !confirm('Are you sure you want to reset this mark to 0?')) {
                 return;
             }
             
@@ -9237,14 +11138,16 @@ if ($page == 'reports') {
             })
             .then(response => response.text())
             .then(data => {
+                console.log('Response:', data);
                 hideLoading();
                 if (data.includes('successfully') || data.includes('Success')) {
-                    showNotification('Mark deleted successfully!', 'success');
+                    showNotification('Mark reset successfully!', 'success');
                     setTimeout(() => {
                         reloadTableData('marks');
                     }, 500);
                 } else {
-                    showNotification('An error occurred. Please try again.', 'error');
+                    console.error('Server response:', data);
+                    showNotification(data || 'An error occurred. Please try again.', 'error');
                 }
             })
             .catch(error => {
