@@ -1,4 +1,7 @@
 ﻿<?php
+// Authentication Check
+include 'auth_check.php';
+
 // Start output buffering to prevent HTML output before JSON responses
 ob_start();
 
@@ -10,12 +13,31 @@ if (isset($_POST['action'])) {
     header('Content-Type: application/json');
     
     if ($_POST['action'] === 'update_mark') {
+        // PERMISSION CHECK: Only teachers can edit marks, not admins
+        if (!isTeacher()) {
+            echo json_encode(['success' => false, 'message' => 'Access Denied: Only teachers can edit student marks. Administrators have view-only access.']);
+            exit;
+        }
+        
         $student_id = $_POST['student_id'];
         $subject_id = $_POST['subject_id'];
         $final_mark = (int)$_POST['final_mark'];
         $midterm_mark = (int)$_POST['midterm_mark'];
         $quizzes_mark = (int)$_POST['quizzes_mark'];
         $daily_mark = (int)$_POST['daily_mark'];
+        
+        // Check if teacher is assigned to this subject
+        $teacher_id = $_SESSION['teacher_id'];
+        if (!canEditSubject($teacher_id, $subject_id)) {
+            echo json_encode(['success' => false, 'message' => 'Access Denied: You are not assigned to teach this subject.']);
+            exit;
+        }
+        
+        // Check if student is enrolled in this subject
+        if (!canEditStudentMarks($teacher_id, $student_id, $subject_id)) {
+            echo json_encode(['success' => false, 'message' => 'Access Denied: This student is not enrolled in your subject.']);
+            exit;
+        }
         
         // Calculate total
         $total_mark = $final_mark + $midterm_mark + $quizzes_mark + $daily_mark;
@@ -55,6 +77,9 @@ if (isset($_POST['action'])) {
         }
         
         if ($result) {
+            // Log the action
+            logAction('update_mark', 'marks', null, null, ['student_id' => $student_id, 'subject_id' => $subject_id, 'total_mark' => $total_mark]);
+            
             echo json_encode(['success' => true, 'total' => $total_mark, 'final_grade' => $final_grade]);
         } else {
             echo json_encode(['success' => false, 'message' => 'Database error: ' . pg_last_error($conn)]);
@@ -247,6 +272,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['action'])) {
 }
 
 if (isset($_POST['action']) && $_POST['action'] === 'add_student') {
+    // ADMIN ONLY: Teachers cannot add students
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can add students.']);
+        exit;
+    }
+    
     $name = trim($_POST['student_name']);
     $age = (int)$_POST['age'];
     $gender = trim($_POST['gender']);
@@ -299,6 +330,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_student') {
 }
 
 if (isset($_POST['action']) && $_POST['action'] === 'add_subject') {
+    // ADMIN ONLY: Teachers cannot add subjects
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can add subjects.']);
+        exit;
+    }
+    
     $subject_name = trim($_POST['subject_name']);
     $description = trim($_POST['description'] ?? '');
     $credits = (int)$_POST['credits'];
@@ -318,6 +355,317 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_subject') {
         $error_message = "Subject name and credits are required.";
     }
 }
+
+// Teacher Management Actions
+if (isset($_POST['action']) && $_POST['action'] === 'add_teacher') {
+    // ADMIN ONLY: Teachers cannot add other teachers
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can add teachers.']);
+        exit;
+    }
+    
+    $name = trim($_POST['teacher_name']);
+    $email = trim($_POST['email']);
+    $phone = trim($_POST['phone'] ?? '');
+    $specialization = trim($_POST['specialization']);
+    $degree = trim($_POST['degree']);
+    $salary = !empty($_POST['salary']) ? (int)$_POST['salary'] : null;
+    $join_date = trim($_POST['join_date']);
+    $subject_id = !empty($_POST['subject_id']) ? (int)$_POST['subject_id'] : null;
+    $year = !empty($_POST['year']) ? (int)$_POST['year'] : null;
+    $class_level = !empty($_POST['class_level']) ? trim($_POST['class_level']) : null;
+    
+    // Generate username from name (e.g., "Ahmed Ali" -> "ahmed.ali@school.edu")
+    $username = strtolower(str_replace(' ', '.', $name)) . '@school.edu';
+    
+    // Generate temporary password (teacher should change it on first login)
+    $temp_password = 'teacher' . rand(1000, 9999);
+    $hashed_password = password_hash($temp_password, PASSWORD_DEFAULT);
+    
+    if (!empty($name) && !empty($email) && !empty($specialization) && !empty($degree)) {
+        // Check if email already exists
+        $check_query = "SELECT id FROM teachers WHERE email = $1";
+        $check_result = pg_query_params($conn, $check_query, array($email));
+        
+        if (pg_num_rows($check_result) > 0) {
+            echo json_encode(['success' => false, 'message' => 'Email already exists!']);
+            exit;
+        }
+        
+        // Check if username already exists
+        $check_username = "SELECT id FROM teachers WHERE username = $1";
+        $check_username_result = pg_query_params($conn, $check_username, array($username));
+        
+        if (pg_num_rows($check_username_result) > 0) {
+            // Add number suffix to make it unique
+            $username = strtolower(str_replace(' ', '.', $name)) . rand(100, 999) . '@school.edu';
+        }
+        
+        // Start transaction
+        pg_query($conn, "BEGIN");
+        
+        $query = "INSERT INTO teachers (name, email, phone, specialization, degree, salary, join_date, username, password, role, is_active, created_by) 
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'teacher', true, $10) RETURNING id";
+        $result = pg_query_params($conn, $query, array(
+            $name, $email, $phone, $specialization, $degree, $salary, $join_date, 
+            $username, $hashed_password, $_SESSION['user_id']
+        ));
+        
+        if ($result) {
+            $teacher_id = pg_fetch_assoc($result)['id'];
+            
+            // If subject is assigned, add it to teacher_subjects
+            if ($subject_id && $year && $class_level) {
+                $assign_query = "INSERT INTO teacher_subjects (teacher_id, subject_id, year, class_level) VALUES ($1, $2, $3, $4)";
+                $assign_result = pg_query_params($conn, $assign_query, array($teacher_id, $subject_id, $year, $class_level));
+                
+                if (!$assign_result) {
+                    pg_query($conn, "ROLLBACK");
+                    echo json_encode(['success' => false, 'message' => 'Error assigning subject: ' . pg_last_error($conn)]);
+                    exit;
+                }
+            }
+            
+            // Log the action
+            logAction('create_teacher', 'teachers', $teacher_id, null, ['name' => $name, 'username' => $username]);
+            
+            pg_query($conn, "COMMIT");
+            echo json_encode([
+                'success' => true, 
+                'message' => 'Teacher added successfully!',
+                'credentials' => [
+                    'username' => $username,
+                    'password' => $temp_password
+                ]
+            ]);
+            exit;
+        } else {
+            pg_query($conn, "ROLLBACK");
+            echo json_encode(['success' => false, 'message' => 'Error adding teacher: ' . pg_last_error($conn)]);
+            exit;
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Name, email, specialization, and degree are required.']);
+        exit;
+    }
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'update_teacher') {
+    // ADMIN ONLY: Teachers cannot update other teachers
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can update teachers.']);
+        exit;
+    }
+    
+    $teacher_id = (int)$_POST['teacher_id'];
+    $name = trim($_POST['teacher_name']);
+    $email = trim($_POST['email']);
+    $phone = trim($_POST['phone'] ?? '');
+    $specialization = trim($_POST['specialization']);
+    $degree = trim($_POST['degree']);
+    $salary = !empty($_POST['salary']) ? (int)$_POST['salary'] : null;
+    $join_date = trim($_POST['join_date']);
+    
+    if ($teacher_id > 0 && !empty($name) && !empty($email) && !empty($specialization) && !empty($degree)) {
+        // Check if email already exists for other teachers
+        $check_query = "SELECT id FROM teachers WHERE email = $1 AND id != $2";
+        $check_result = pg_query_params($conn, $check_query, array($email, $teacher_id));
+        
+        if (pg_num_rows($check_result) > 0) {
+            echo json_encode(['success' => false, 'message' => 'Email already exists!']);
+            exit;
+        }
+        
+        $query = "UPDATE teachers SET name = $1, email = $2, phone = $3, specialization = $4, degree = $5, salary = $6, join_date = $7 WHERE id = $8";
+        $result = pg_query_params($conn, $query, array($name, $email, $phone, $specialization, $degree, $salary, $join_date, $teacher_id));
+        
+        if ($result) {
+            echo json_encode(['success' => true, 'message' => 'Teacher updated successfully!']);
+            exit;
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Error updating teacher: ' . pg_last_error($conn)]);
+            exit;
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Invalid data.']);
+        exit;
+    }
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'delete_teacher') {
+    // ADMIN ONLY: Teachers cannot delete other teachers
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can delete teachers.']);
+        exit;
+    }
+    
+    $teacher_id = (int)$_POST['teacher_id'];
+    
+    if ($teacher_id > 0) {
+        // Delete teacher (assignments will be cascade deleted)
+        $query = "DELETE FROM teachers WHERE id = $1";
+        $result = pg_query_params($conn, $query, array($teacher_id));
+        
+        if ($result) {
+            echo json_encode(['success' => true, 'message' => 'Teacher deleted successfully!']);
+            exit;
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Error deleting teacher: ' . pg_last_error($conn)]);
+            exit;
+        }
+    }
+}
+
+// Generate/Update login credentials for existing teacher (Manual Entry)
+if (isset($_POST['action']) && $_POST['action'] === 'generate_teacher_credentials') {
+    // ADMIN ONLY: Teachers cannot generate credentials
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can manage credentials.']);
+        exit;
+    }
+    
+    $teacher_id = (int)$_POST['teacher_id'];
+    $username = trim($_POST['username']);
+    $password = trim($_POST['password']);
+    
+    if ($teacher_id > 0 && !empty($username) && !empty($password)) {
+        // Validate password length
+        if (strlen($password) < 6) {
+            echo json_encode(['success' => false, 'message' => 'Password must be at least 6 characters long.']);
+            exit;
+        }
+        
+        // Get teacher details
+        $check_query = "SELECT id, name, username FROM teachers WHERE id = $1";
+        $check_result = pg_query_params($conn, $check_query, array($teacher_id));
+        
+        if (pg_num_rows($check_result) === 0) {
+            echo json_encode(['success' => false, 'message' => 'Teacher not found!']);
+            exit;
+        }
+        
+        $teacher_data = pg_fetch_assoc($check_result);
+        
+        // Check if username already exists for other teachers
+        $check_username = "SELECT id FROM teachers WHERE username = $1 AND id != $2";
+        $username_result = pg_query_params($conn, $check_username, array($username, $teacher_id));
+        
+        if (pg_num_rows($username_result) > 0) {
+            echo json_encode(['success' => false, 'message' => 'Username already exists for another teacher!']);
+            exit;
+        }
+        
+        // Hash password
+        $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+        
+        // Update teacher with new credentials
+        $update_query = "UPDATE teachers SET username = $1, password = $2, role = 'teacher', is_active = true WHERE id = $3";
+        $update_result = pg_query_params($conn, $update_query, array($username, $hashed_password, $teacher_id));
+        
+        if ($update_result) {
+            // Log the action
+            logAction('update_credentials', 'teachers', $teacher_id, 
+                      ['username' => $teacher_data['username']], 
+                      ['username' => $username]);
+            
+            echo json_encode([
+                'success' => true,
+                'message' => 'Credentials saved successfully!'
+            ]);
+            exit;
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Error saving credentials: ' . pg_last_error($conn)]);
+            exit;
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Please provide all required fields.']);
+        exit;
+    }
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'remove_teacher_assignment') {
+    $assignment_id = (int)$_POST['assignment_id'];
+    
+    if ($assignment_id > 0) {
+        $query = "DELETE FROM teacher_subjects WHERE id = $1";
+        $result = pg_query_params($conn, $query, array($assignment_id));
+        
+        if ($result) {
+            echo json_encode(['success' => true, 'message' => 'Assignment removed successfully!']);
+            exit;
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Error removing assignment: ' . pg_last_error($conn)]);
+            exit;
+        }
+    }
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'assign_subject_to_teacher') {
+    $teacher_id = (int)$_POST['teacher_id'];
+    $subject_id = (int)$_POST['subject_id'];
+    $year = (int)$_POST['year'];
+    $class_level = trim($_POST['class_level']);
+    
+    if ($teacher_id > 0 && $subject_id > 0 && $year > 0 && !empty($class_level)) {
+        // Check if assignment already exists
+        $check_query = "SELECT id FROM teacher_subjects WHERE teacher_id = $1 AND subject_id = $2 AND year = $3 AND class_level = $4";
+        $check_result = pg_query_params($conn, $check_query, array($teacher_id, $subject_id, $year, $class_level));
+        
+        if (pg_num_rows($check_result) > 0) {
+            echo json_encode(['success' => false, 'message' => 'Assignment already exists!']);
+            exit;
+        }
+        
+        $query = "INSERT INTO teacher_subjects (teacher_id, subject_id, year, class_level) VALUES ($1, $2, $3, $4)";
+        $result = pg_query_params($conn, $query, array($teacher_id, $subject_id, $year, $class_level));
+        
+        if ($result) {
+            echo json_encode(['success' => true, 'message' => 'Subject assigned successfully!']);
+            exit;
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Error assigning subject: ' . pg_last_error($conn)]);
+            exit;
+        }
+    }
+}
+
+// AJAX handler to get teacher data
+if (isset($_GET['action']) && $_GET['action'] === 'get_teacher' && isset($_GET['id'])) {
+    header('Content-Type: application/json');
+    $teacher_id = (int)$_GET['id'];
+    
+    if ($teacher_id > 0) {
+        $query = "SELECT * FROM teachers WHERE id = $1";
+        $result = pg_query_params($conn, $query, array($teacher_id));
+        
+        if ($result && pg_num_rows($result) > 0) {
+            $teacher = pg_fetch_assoc($result);
+            echo json_encode(['success' => true, 'teacher' => $teacher]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Teacher not found']);
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Invalid teacher ID']);
+    }
+    exit;
+}
+
+// AJAX handler to get available subjects for teacher assignment
+if (isset($_GET['action']) && $_GET['action'] === 'get_available_subjects') {
+    header('Content-Type: application/json');
+    
+    $query = "SELECT id, subject_name, year FROM subjects ORDER BY year, subject_name";
+    $result = pg_query($conn, $query);
+    
+    if ($result) {
+        $subjects = pg_fetch_all($result);
+        echo json_encode(['success' => true, 'subjects' => $subjects ?: []]);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Failed to load subjects']);
+    }
+    exit;
+}
+
 
 if (isset($_POST['action']) && $_POST['action'] === 'add_mark') {
     $student_id = (int)$_POST['student_id'];
@@ -370,6 +718,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_mark') {
 }
 
 if (isset($_POST['action']) && $_POST['action'] === 'update_student') {
+    // ADMIN ONLY: Teachers cannot update students
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can update students.']);
+        exit;
+    }
+    
     $student_id = (int)$_POST['student_id'];
     $name = trim($_POST['student_name']);
     $age = (int)$_POST['age'];
@@ -440,6 +794,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_student') {
 }
 
 if (isset($_POST['action']) && $_POST['action'] === 'delete_student') {
+    // ADMIN ONLY: Teachers cannot delete students
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can delete students.']);
+        exit;
+    }
+    
     $student_id = (int)$_POST['student_id'];
     
     if ($student_id > 0) {
@@ -480,6 +840,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'manual_resequence') {
 }
 
 if (isset($_POST['action']) && $_POST['action'] === 'update_subject') {
+    // ADMIN ONLY: Teachers cannot update subjects
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can update subjects.']);
+        exit;
+    }
+    
     $subject_id = (int)$_POST['subject_id'];
     $subject_name = trim($_POST['subject_name']);
     $description = trim($_POST['description'] ?? '');
@@ -502,6 +868,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_subject') {
 }
 
 if (isset($_POST['action']) && $_POST['action'] === 'delete_subject') {
+    // ADMIN ONLY: Teachers cannot delete subjects
+    if (!isAdmin()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only administrators can delete subjects.']);
+        exit;
+    }
+    
     $subject_id = (int)$_POST['subject_id'];
     
     if ($subject_id > 0) {
@@ -567,9 +939,34 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_mark_record') {
 }
 
 if (isset($_POST['action']) && $_POST['action'] === 'delete_mark') {
+    // PERMISSION CHECK: Only teachers can delete/reset marks, not admins
+    if (!isTeacher()) {
+        echo json_encode(['success' => false, 'message' => 'Access Denied: Only teachers can reset marks. Administrators have view-only access.']);
+        exit;
+    }
+    
     $mark_id = (int)$_POST['mark_id'];
     
     if ($mark_id > 0) {
+        // Get subject_id and student_id from mark to check permissions
+        $mark_check = pg_query_params($conn, "SELECT student_id, subject_id FROM marks WHERE id = $1", array($mark_id));
+        
+        if (!$mark_check || pg_num_rows($mark_check) === 0) {
+            echo "Invalid mark ID.";
+            exit;
+        }
+        
+        $mark_data = pg_fetch_assoc($mark_check);
+        $student_id = $mark_data['student_id'];
+        $subject_id = $mark_data['subject_id'];
+        $teacher_id = $_SESSION['teacher_id'];
+        
+        // Check if teacher can edit this mark
+        if (!canEditStudentMarks($teacher_id, $student_id, $subject_id)) {
+            echo "Access Denied: You cannot reset marks for subjects you don't teach.";
+            exit;
+        }
+        
         // Instead of deleting, reset all marks to 0
         $reset_query = "UPDATE marks 
                         SET final_exam = 0, 
@@ -583,6 +980,9 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_mark') {
         $result = pg_query_params($conn, $reset_query, array($mark_id));
         
         if ($result) {
+            // Log the action
+            logAction('reset_mark', 'marks', $mark_id, null, ['student_id' => $student_id, 'subject_id' => $subject_id]);
+            
             echo "Mark reset successfully!";
             exit;
         } else {
@@ -1264,6 +1664,14 @@ if (isset($_GET['error'])) {
 
 // Get page parameter
 $page = $_GET['page'] ?? 'reports';
+
+// TEACHER PERMISSIONS: Restrict teachers to marks page only
+if (isTeacher()) {
+    $allowed_pages = ['marks']; // Teachers can only access marks page
+    if (!in_array($page, $allowed_pages)) {
+        $page = 'marks'; // Force redirect to marks page
+    }
+}
 
 // Get updated KPIs
 function getKPIs($conn, $filter_year = null) {
@@ -2980,6 +3388,224 @@ if ($page == 'reports') {
             border-color: var(--primary-color);
         }
 
+        /* ===== ACTION BUTTONS FOR TEACHERS ===== */
+        .action-btn {
+            padding: 0.4rem 0.8rem;
+            margin: 0 0.2rem;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: var(--transition);
+            font-size: 0.85rem;
+            font-weight: 500;
+            background: var(--hover-color);
+            color: var(--text-color);
+        }
+
+        .action-btn.edit {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: white;
+        }
+
+        .action-btn.edit:hover {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(37, 99, 235, 0.3);
+        }
+
+        .action-btn.delete {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+        }
+
+        .action-btn.delete:hover {
+            background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(239, 68, 68, 0.3);
+        }
+
+        .action-btn.view {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+        }
+
+        .action-btn.view:hover {
+            background: linear-gradient(135deg, #059669 0%, #047857 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(16, 185, 129, 0.3);
+        }
+
+        /* Total subjects badge */
+        .total-subjects-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.4rem 0.8rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            transition: var(--transition);
+        }
+
+        .total-subjects-badge:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+        
+        /* Badge styles */
+        .badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            border: 1px solid transparent;
+        }
+        
+        .badge-primary {
+            background: #eff6ff;
+            color: #1e40af;
+            border-color: #bfdbfe;
+        }
+        
+        .badge-secondary {
+            background: #f1f5f9;
+            color: #334155;
+            border-color: #e2e8f0;
+        }
+        
+        .badge-success {
+            background: #f0fdf4;
+            color: #166534;
+            border-color: #bbf7d0;
+        }
+        
+        .badge-danger {
+            background: #fef2f2;
+            color: #991b1b;
+            border-color: #fecaca;
+        }
+        
+        .badge-warning {
+            background: #fef3c7;
+            color: #92400e;
+            border-color: #fde68a;
+        }
+        
+        .badge-info {
+            background: #f0f9ff;
+            color: #075985;
+            border-color: #bae6fd;
+        }
+        
+        /* Modal styles */
+        .modal {
+            position: fixed;
+            z-index: 10000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+        }
+        
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto;
+            padding: 0;
+            border: none;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 600px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            animation: modalSlideIn 0.3s ease;
+        }
+        
+        @keyframes modalSlideIn {
+            from {
+                transform: translateY(-50px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+        
+        .modal-header {
+            padding: 1.5rem 2rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 12px 12px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .modal-header h3 {
+            margin: 0;
+            font-size: 1.25rem;
+        }
+        
+        .modal-body {
+            padding: 2rem;
+        }
+        
+        .close {
+            color: white;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .close:hover,
+        .close:focus {
+            transform: scale(1.2);
+        }
+        
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #1e293b;
+        }
+        
+        .form-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        /* Status badges */
+        .status-badge {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-badge.active {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .status-badge.inactive {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
         .table-container {
             overflow-x: auto;
             border-radius: 8px;
@@ -3005,6 +3631,26 @@ if ($page == 'reports') {
             font-size: 0.85rem;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+        }
+
+        /* Teachers Table Specific Styling */
+        #teachersTable th {
+            text-align: center;
+            vertical-align: middle;
+        }
+
+        #teachersTable th:nth-child(2),
+        #teachersTable th:nth-child(3) {
+            text-align: left;
+        }
+
+        #teachersTable td {
+            vertical-align: middle;
+        }
+
+        #teachersTable td:nth-child(2),
+        #teachersTable td:nth-child(3) {
+            text-align: left;
         }
 
         tr:hover {
@@ -3344,7 +3990,9 @@ if ($page == 'reports') {
         /* ===== RESPONSIVE DESIGN ===== */
         @media (max-width: 768px) {
             .container { padding: 1rem; }
-            .nav-container { padding: 0 1rem; }
+            .nav-container { padding: 0 1rem; flex-wrap: wrap; }
+            .user-info-section { flex-wrap: wrap; width: 100%; justify-content: center !important; margin-top: 10px; }
+            .current-user { font-size: 12px !important; }
             .reports-main-content { padding: 1rem; }
             .dashboard-header { padding: 1.5rem 1rem; }
             .dashboard-header h1 { font-size: 1.8rem; }
@@ -3376,18 +4024,37 @@ if ($page == 'reports') {
                 </div>
             </div>
             <div class="nav-links">
-                <a href="?page=reports" <?= $page == 'reports' ? 'class="active"' : '' ?> data-translate="nav_reports">Dashboard</a>
-                <a href="?page=students" <?= $page == 'students' ? 'class="active"' : '' ?> data-translate="nav_students">Students</a>
-                <a href="?page=marks" <?= $page == 'marks' ? 'class="active"' : '' ?> data-translate="nav_marks">Marks</a>
-                <a href="?page=subjects" <?= $page == 'subjects' ? 'class="active"' : '' ?> data-translate="nav_subjects">Subjects</a>
-                <a href="?page=graduated" <?= $page == 'graduated' ? 'class="active"' : '' ?> data-translate="nav_graduated">Graduates</a>
+                <?php if (isAdmin()): ?>
+                    <a href="?page=reports" <?= $page == 'reports' ? 'class="active"' : '' ?> data-translate="nav_reports">Dashboard</a>
+                    <a href="?page=students" <?= $page == 'students' ? 'class="active"' : '' ?> data-translate="nav_students">Students</a>
+                    <a href="?page=marks" <?= $page == 'marks' ? 'class="active"' : '' ?> data-translate="nav_marks">Marks</a>
+                    <a href="?page=subjects" <?= $page == 'subjects' ? 'class="active"' : '' ?> data-translate="nav_subjects">Subjects</a>
+                    <a href="?page=teachers" <?= $page == 'teachers' ? 'class="active"' : '' ?> data-translate="nav_teachers">Teachers</a>
+                    <a href="?page=teacher_dashboard" <?= $page == 'teacher_dashboard' ? 'class="active"' : '' ?>>Teacher Access</a>
+                    <a href="?page=graduated" <?= $page == 'graduated' ? 'class="active"' : '' ?> data-translate="nav_graduated">Graduates</a>
+                <?php else: ?>
+                    <a href="teacher_dashboard.php" data-translate="nav_dashboard">My Dashboard</a>
+                    <a href="?page=marks" class="active" data-translate="nav_marks">My Students' Marks</a>
+                <?php endif; ?>
             </div>
-            <div class="language-switcher">
-                <select id="languageSelector" onchange="changeLanguage(this.value)">
-                    <option value="en">En</option>
-                    <option value="ar">Ar</option>
-                    <option value="ku">Kr</option>
-                </select>
+            <div class="user-info-section" style="display: flex; align-items: center; gap: 20px;">
+                <div class="current-user" style="display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: rgba(255,255,255,0.1); border-radius: 8px;">
+                    <span style="font-size: 20px;"><?= isAdmin() ? '👨‍💼' : '👨‍🏫' ?></span>
+                    <div style="display: flex; flex-direction: column; align-items: flex-start;">
+                        <span style="font-size: 12px; opacity: 0.8;"><?= isAdmin() ? 'Administrator' : 'Teacher' ?></span>
+                        <span style="font-weight: 600; font-size: 14px;"><?= htmlspecialchars($_SESSION['full_name']) ?></span>
+                    </div>
+                </div>
+                <a href="logout.php" style="padding: 8px 16px; background: rgba(255,255,255,0.2); border-radius: 8px; text-decoration: none; color: white; font-weight: 500; transition: all 0.3s; border: 1px solid rgba(255,255,255,0.3);" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                    🚪 Logout
+                </a>
+                <div class="language-switcher">
+                    <select id="languageSelector" onchange="changeLanguage(this.value)">
+                        <option value="en">En</option>
+                        <option value="ar">Ar</option>
+                        <option value="ku">Kr</option>
+                    </select>
+                </div>
             </div>
         </div>
     </nav>
@@ -4597,6 +5264,290 @@ if ($page == 'reports') {
                 </div>
             </div>
 
+        <?php elseif ($page == 'teacher_dashboard'): ?>
+            <!-- TEACHER ACCESS MANAGEMENT PAGE -->
+            <div class="content-wrapper">
+                <div class="dashboard-header">
+                    <h1 data-translate="teacher_access_title">Teacher Access Management</h1>
+                    <p class="dashboard-subtitle" data-translate="teacher_access_subtitle">Manage teacher login credentials and system access</p>
+                </div>
+
+                <div class="reports-main-content">
+                    <!-- Statistics Cards -->
+                    <div class="kpi-grid">
+                        <?php
+                        // Get real teacher statistics
+                        $total_teachers_result = pg_query($conn, "SELECT COUNT(*) as count FROM teachers");
+                        $total_teachers = pg_fetch_assoc($total_teachers_result)['count'] ?? 0;
+                        
+                        $active_login_result = pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NOT NULL AND password IS NOT NULL AND username != ''");
+                        $active_logins = pg_fetch_assoc($active_login_result)['count'] ?? 0;
+                        
+                        $no_login_result = pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NULL OR password IS NULL OR username = ''");
+                        $no_logins = pg_fetch_assoc($no_login_result)['count'] ?? 0;
+                        
+                        $total_assignments_result = pg_query($conn, "SELECT COUNT(*) as count FROM teacher_subjects");
+                        $total_assignments = pg_fetch_assoc($total_assignments_result)['count'] ?? 0;
+                        ?>
+                        
+                        <div class="kpi-card">
+                            <div class="kpi-icon">
+                                <i class="fas fa-chalkboard-teacher"></i>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= $total_teachers ?></div>
+                                <div class="kpi-label" data-translate="total_teachers">Total Teachers</div>
+                            </div>
+                        </div>
+                        
+                        <div class="kpi-card">
+                            <div class="kpi-icon">
+                                <i class="fas fa-check-circle"></i>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= $active_logins ?></div>
+                                <div class="kpi-label" data-translate="active_logins">Active Logins</div>
+                            </div>
+                        </div>
+                        
+                        <div class="kpi-card">
+                            <div class="kpi-icon">
+                                <i class="fas fa-user-lock"></i>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= $no_logins ?></div>
+                                <div class="kpi-label" data-translate="no_access">No Access</div>
+                            </div>
+                        </div>
+                        
+                        <div class="kpi-card">
+                            <div class="kpi-icon">
+                                <i class="fas fa-book"></i>
+                            </div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= $total_assignments ?></div>
+                                <div class="kpi-label" data-translate="total_assignments">Subject Assignments</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Charts Section -->
+                    <div class="charts-grid">
+                        <div class="chart-card">
+                            <h3 class="chart-title">Teachers by Specialization</h3>
+                            <div class="chart-container">
+                                <canvas id="teacherSpecializationChart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="chart-card">
+                            <h3 class="chart-title">Teachers by Degree</h3>
+                            <div class="chart-container">
+                                <canvas id="teacherDegreeChart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="chart-card">
+                            <h3 class="chart-title">Login Status Distribution</h3>
+                            <div class="chart-container">
+                                <canvas id="loginStatusChart"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="chart-card">
+                            <h3 class="chart-title">Subject Assignments</h3>
+                            <div class="chart-container">
+                                <canvas id="subjectAssignmentsChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Teacher Credential Management Table -->
+                    <div class="data-table-section" data-aos="fade-up">
+                        <div class="section-header">
+                            <h3 class="section-title">Teacher Credential Management</h3>
+                            <div class="export-actions">
+                                <button class="export-btn" onclick="printTable()">Print</button>
+                            </div>
+                        </div>
+
+                        <!-- Filter Bar -->
+                        <div class="filter-sections" style="margin-bottom: 1rem;">
+                            <div class="filter-section">
+                                <label class="filter-label">Search Teacher</label>
+                                <input type="text" id="searchTeacherAccess" class="premium-select" placeholder="Search by name..." onkeyup="filterTeacherAccess()">
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label">Filter by Specialization</label>
+                                <select id="filterSpecialization" class="premium-select" onchange="filterTeacherAccess()">
+                                    <option value="">All Specializations</option>
+                                    <?php
+                                    $spec_query = "SELECT DISTINCT specialization FROM teachers WHERE specialization IS NOT NULL ORDER BY specialization";
+                                    $spec_result = pg_query($conn, $spec_query);
+                                    while ($spec = pg_fetch_assoc($spec_result)) {
+                                        echo "<option value='" . htmlspecialchars($spec['specialization']) . "'>" . htmlspecialchars($spec['specialization']) . "</option>";
+                                    }
+                                    ?>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label">Filter by Status</label>
+                                <select id="filterLoginStatus" class="premium-select" onchange="filterTeacherAccess()">
+                                    <option value="">All</option>
+                                    <option value="active">Has Login</option>
+                                    <option value="no_login">No Login</option>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label">Filter by Degree</label>
+                                <select id="filterDegree" class="premium-select" onchange="filterTeacherAccess()">
+                                    <option value="">All Degrees</option>
+                                    <?php
+                                    $degree_query = "SELECT DISTINCT degree FROM teachers WHERE degree IS NOT NULL ORDER BY degree";
+                                    $degree_result = pg_query($conn, $degree_query);
+                                    while ($deg = pg_fetch_assoc($degree_result)) {
+                                        echo "<option value='" . htmlspecialchars($deg['degree']) . "'>" . htmlspecialchars($deg['degree']) . "</option>";
+                                    }
+                                    ?>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="table-container">
+                            <table id="teacherAccessTable">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Teacher Name</th>
+                                        <th>Contact Email</th>
+                                        <th>Specialization</th>
+                                        <th>Degree</th>
+                                        <th>Login Username</th>
+                                        <th>Status</th>
+                                        <th>Subjects</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    $teachers_query = "SELECT t.*, 
+                                                             COUNT(DISTINCT ts.subject_id) as subject_count
+                                                      FROM teachers t
+                                                      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
+                                                      GROUP BY t.id
+                                                      ORDER BY t.name";
+                                    $teachers_result = pg_query($conn, $teachers_query);
+                                    
+                                    if ($teachers_result && pg_num_rows($teachers_result) > 0):
+                                        while($teacher = pg_fetch_assoc($teachers_result)):
+                                            $has_login = !empty($teacher['username']) && !empty($teacher['password']);
+                                    ?>
+                                    <tr class="teacher-access-row" 
+                                        data-name="<?= strtolower(htmlspecialchars($teacher['name'])) ?>"
+                                        data-specialization="<?= htmlspecialchars($teacher['specialization'] ?? '') ?>"
+                                        data-degree="<?= htmlspecialchars($teacher['degree'] ?? '') ?>"
+                                        data-status="<?= $has_login ? 'active' : 'no_login' ?>">
+                                        <td style="text-align: center;"><?= $teacher['id'] ?></td>
+                                        <td><strong><?= htmlspecialchars($teacher['name']) ?></strong></td>
+                                        <td><?= htmlspecialchars($teacher['email']) ?></td>
+                                        <td style="text-align: center;">
+                                            <span class="badge badge-secondary">
+                                                <?= htmlspecialchars($teacher['specialization'] ?? 'N/A') ?>
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <span class="badge badge-info">
+                                                <?= htmlspecialchars($teacher['degree'] ?? 'N/A') ?>
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <?php if ($has_login): ?>
+                                                <span class="badge badge-primary">
+                                                    <?= htmlspecialchars($teacher['username']) ?>
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="color: #94a3b8;">Not Set</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <?php if ($has_login): ?>
+                                                <span class="badge badge-success">Active</span>
+                                            <?php else: ?>
+                                                <span class="badge badge-danger">No Access</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <span class="badge badge-warning">
+                                                <?= $teacher['subject_count'] ?> 
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <button class="action-btn edit" 
+                                                    onclick="openCredentialModal(<?= $teacher['id'] ?>, '<?= htmlspecialchars($teacher['name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($teacher['username'] ?? '', ENT_QUOTES) ?>')">
+                                                <?= $has_login ? 'Update' : 'Create' ?> Access
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    <?php
+                                        endwhile;
+                                    else:
+                                    ?>
+                                    <tr>
+                                        <td colspan="9" style="text-align: center; padding: 2rem; color: #64748b;">
+                                            No teachers found
+                                        </td>
+                                    </tr>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Credential Modal -->
+            <div id="credentialModal" class="modal" style="display: none;">
+                <div class="modal-content" style="max-width: 500px;">
+                    <div class="modal-header">
+                        <h3 id="modalTitle">Create Teacher Access</h3>
+                        <span class="close" onclick="closeCredentialModal()">&times;</span>
+                    </div>
+                    <div class="modal-body">
+                        <form id="credentialForm" onsubmit="return saveTeacherCredentials(event);">
+                            <input type="hidden" id="credential_teacher_id" name="teacher_id">
+                            
+                            <div class="form-group">
+                                <label>Teacher Name</label>
+                                <input type="text" id="credential_teacher_name" class="premium-select" readonly>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Login Email/Username *</label>
+                                <input type="text" id="credential_username" name="username" class="premium-select" 
+                                       placeholder="teacher.email@school.edu" required>
+                                <small style="color: #64748b; font-size: 0.85rem;">This will be used for login</small>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Password *</label>
+                                <input type="text" id="credential_password" name="password" class="premium-select" 
+                                       placeholder="Enter password" required>
+                                <small style="color: #64748b; font-size: 0.85rem;">Minimum 6 characters</small>
+                            </div>
+                            
+                            <div class="form-actions" style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                                <button type="button" class="action-btn delete" onclick="closeCredentialModal()">Cancel</button>
+                                <button type="submit" class="action-btn edit">Save Credentials</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
         <?php elseif ($page == 'graduated'): ?>
             <!-- GRADUATED STUDENTS PAGE -->
             <div class="content-wrapper">
@@ -4702,6 +5653,341 @@ if ($page == 'reports') {
                 </div>
             </div>
 
+        <?php elseif ($page == 'teachers'): ?>
+            <!-- TEACHERS PAGE -->
+            <div class="content-wrapper">
+                <div class="dashboard-header">
+                    <h1 data-translate="teachers_title">👨‍🏫 Teachers Management</h1>
+                    <p class="dashboard-subtitle" data-translate="manage_teacher_info">Manage teachers and subject assignments</p>
+                </div>
+                <div class="reports-main-content">
+                    <!-- Add Teacher Form -->
+                    <div class="filter-panel" data-aos="fade-up">
+                        <h3 class="filter-title" data-translate="add_new_teacher">➕ Add New Teacher</h3>
+                        <form method="POST" action="" id="addTeacherForm" onsubmit="return handleTeacherFormSubmit(event, this);">
+                            <input type="hidden" name="action" value="add_teacher">
+                            <div class="filter-sections">
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="full_name">Full Name *</label>
+                                    <input type="text" name="teacher_name" class="premium-select" required placeholder="Enter teacher's full name" data-translate-placeholder="enter_full_name">
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="email">Email *</label>
+                                    <input type="email" name="email" class="premium-select" required placeholder="teacher@school.edu" data-translate-placeholder="teacher_email">
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="phone">Phone</label>
+                                    <input type="tel" name="phone" class="premium-select" placeholder="07XX XXX XXXX" data-translate-placeholder="phone_number">
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="specialization">Specialization *</label>
+                                    <select name="specialization" class="premium-select" required>
+                                        <option value="" data-translate="select_specialization">Select Specialization</option>
+                                        <option value="Mathematics">Mathematics</option>
+                                        <option value="Physics">Physics</option>
+                                        <option value="Chemistry">Chemistry</option>
+                                        <option value="Biology">Biology</option>
+                                        <option value="English">English</option>
+                                        <option value="Arabic">Arabic</option>
+                                        <option value="Kurdish">Kurdish</option>
+                                        <option value="Computer Science">Computer Science</option>
+                                        <option value="History">History</option>
+                                        <option value="Geography">Geography</option>
+                                        <option value="Islamic Studies">Islamic Studies</option>
+                                        <option value="Physical Education">Physical Education</option>
+                                        <option value="Arts">Arts</option>
+                                        <option value="Management">Management</option>
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="degree">Degree *</label>
+                                    <select name="degree" class="premium-select" required>
+                                        <option value="">Select Degree</option>
+                                        <option value="High School Diploma">High School Diploma</option>
+                                        <option value="Associate Degree">Associate Degree</option>
+                                        <option value="Bachelor's Degree">Bachelor's Degree</option>
+                                        <option value="Master's Degree">Master's Degree</option>
+                                        <option value="Doctorate (PhD)">Doctorate (PhD)</option>
+                                        <option value="Professional Certificate">Professional Certificate</option>
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="salary">Monthly Salary (IQD)</label>
+                                    <input type="number" name="salary" class="premium-select" placeholder="500000" min="0" step="1000">
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="assigned_subjects">Assigned Subject (Optional)</label>
+                                    <select name="subject_id" id="addTeacherSubject" class="premium-select" onchange="updateAddTeacherYear()">
+                                        <option value="">No subject assignment</option>
+                                        <?php
+                                        $subjects_query = "SELECT id, subject_name, year FROM subjects ORDER BY year, subject_name";
+                                        $subjects_result = pg_query($conn, $subjects_query);
+                                        if ($subjects_result) {
+                                            while($subject = pg_fetch_assoc($subjects_result)) {
+                                                echo "<option value='{$subject['id']}' data-year='{$subject['year']}'>{$subject['subject_name']} (Year {$subject['year']})</option>";
+                                            }
+                                        }
+                                        ?>
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="year">Year</label>
+                                    <select name="year" id="addTeacherYear" class="premium-select" disabled>
+                                        <option value="">Select subject first</option>
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="class">Class</label>
+                                    <select name="class_level" class="premium-select">
+                                        <option value="">No class assignment</option>
+                                        <option value="A">Class A</option>
+                                        <option value="B">Class B</option>
+                                        <option value="C">Class C</option>
+                                    </select>
+                                </div>
+                                <div class="filter-section">
+                                    <label class="filter-label" data-translate="join_date">Join Date</label>
+                                    <input type="date" name="join_date" class="premium-select" value="<?= date('Y-m-d') ?>">
+                                </div>
+                            </div>
+                            <div class="filter-actions">
+                                <button type="submit" class="apply-filters-btn" data-translate="add_teacher">Add Teacher</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- Teachers Table -->
+                    <div class="data-table-section" data-aos="fade-up">
+                        <div class="section-header">
+                            <h3 class="section-title" data-translate="teachers_list">Teachers List</h3>
+                            <div class="export-actions">
+                                <button class="export-btn" onclick="printTeachers()" data-translate="print">Print</button>
+                            </div>
+                        </div>
+
+                        <!-- Filter Bar -->
+                        <div class="filter-sections" style="margin-bottom: 1rem; padding: 1rem; background: var(--card-bg); border-radius: 8px;">
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="search">Search</label>
+                                <input type="text" id="searchTeacher" class="premium-select" placeholder="Search by name, email..." onkeyup="filterTeachers()" data-translate-placeholder="search_teachers">
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="filter_degree">Filter by Degree</label>
+                                <select id="filterTeacherDegree" class="premium-select" onchange="filterTeachers()">
+                                    <option value="" data-translate="all">All</option>
+                                    <option value="High School Diploma">High School Diploma</option>
+                                    <option value="Associate Degree">Associate Degree</option>
+                                    <option value="Bachelor's Degree">Bachelor's Degree</option>
+                                    <option value="Master's Degree">Master's Degree</option>
+                                    <option value="Doctorate (PhD)">Doctorate (PhD)</option>
+                                    <option value="Professional Certificate">Professional Certificate</option>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="filter_specialization">Filter by Specialization</label>
+                                <select id="filterTeacherSpec" class="premium-select" onchange="filterTeachers()">
+                                    <option value="" data-translate="all">All</option>
+                                    <option value="Mathematics">Mathematics</option>
+                                    <option value="Physics">Physics</option>
+                                    <option value="Chemistry">Chemistry</option>
+                                    <option value="Biology">Biology</option>
+                                    <option value="English">English</option>
+                                    <option value="Arabic">Arabic</option>
+                                    <option value="Kurdish">Kurdish</option>
+                                    <option value="Computer Science">Computer Science</option>
+                                    <option value="History">History</option>
+                                    <option value="Geography">Geography</option>
+                                    <option value="Islamic Studies">Islamic Studies</option>
+                                    <option value="Physical Education">Physical Education</option>
+                                    <option value="Arts">Arts</option>
+                                    <option value="Management">Management</option>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="filter_year">Filter by Year</label>
+                                <select id="filterTeacherYear" class="premium-select" onchange="filterTeachers()">
+                                    <option value="" data-translate="all">All</option>
+                                    <option value="1">Year 1</option>
+                                    <option value="2">Year 2</option>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="filter_class">Filter by Class</label>
+                                <select id="filterTeacherClass" class="premium-select" onchange="filterTeachers()">
+                                    <option value="" data-translate="all">All</option>
+                                    <option value="A">Class A</option>
+                                    <option value="B">Class B</option>
+                                    <option value="C">Class C</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="table-container">
+                            <table id="teachersTable">
+                                <thead>
+                                    <tr>
+                                        <th data-translate="id">ID</th>
+                                        <th data-translate="name">Name</th>
+                                        <th data-translate="email">Email</th>
+                                        <th data-translate="phone">Phone</th>
+                                        <th data-translate="specialization">Specialization</th>
+                                        <th data-translate="degree">Degree</th>
+                                        <th data-translate="salary">Salary</th>
+                                        <th data-translate="assigned_subjects">Assigned Subjects</th>
+                                        <th data-translate="join_date">Join Date</th>
+                                        <th data-translate="actions">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    $teachers_query = "SELECT t.*, 
+                                                             COUNT(DISTINCT ts.subject_id) as subject_count
+                                                      FROM teachers t
+                                                      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
+                                                      GROUP BY t.id
+                                                      ORDER BY t.name";
+                                    $teachers_result = pg_query($conn, $teachers_query);
+                                    
+                                    if ($teachers_result && pg_num_rows($teachers_result) > 0):
+                                        while($teacher = pg_fetch_assoc($teachers_result)):
+                                    ?>
+                                    <tr class="teacher-row" data-teacher-id="<?= $teacher['id'] ?>" 
+                                        data-degree="<?= htmlspecialchars($teacher['degree'] ?? '') ?>"
+                                        data-specialization="<?= htmlspecialchars($teacher['specialization'] ?? '') ?>">
+                                        <td style="text-align: center;"><?= $teacher['id'] ?></td>
+                                        <td>
+                                            <strong><?= htmlspecialchars($teacher['name']) ?></strong>
+                                        </td>
+                                        <td><?= htmlspecialchars($teacher['email']) ?></td>
+                                        <td style="text-align: center;"><?= htmlspecialchars($teacher['phone'] ?? 'N/A') ?></td>
+                                        <td style="text-align: center;">
+                                            <span style="padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: 500;
+                                                         background: #f1f5f9; color: #334155; display: inline-block; border: 1px solid #e2e8f0;">
+                                                <?= htmlspecialchars($teacher['specialization'] ?? 'N/A') ?>
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <span style="padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: 500;
+                                                         background: #f8fafc; color: #475569; display: inline-block; border: 1px solid #cbd5e1;">
+                                                <?= htmlspecialchars($teacher['degree'] ?? 'N/A') ?>
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <span style="padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: 600;
+                                                         background: #f0fdf4; color: #166534; display: inline-block; border: 1px solid #bbf7d0;">
+                                                <?= isset($teacher['salary']) && $teacher['salary'] ? number_format($teacher['salary']) . ' IQD' : 'N/A' ?>
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <?php if ($teacher['subject_count'] > 0): ?>
+                                                <span class="total-subjects-badge" style="cursor: pointer;" onclick="toggleTeacherDetails(<?= $teacher['id'] ?>)">
+                                                    <span><?= $teacher['subject_count'] ?></span>
+                                                    <span data-translate="subjects">subjects</span>
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="color: #94a3b8; font-size: 0.85rem;" data-translate="no_assignments">No Assignments</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <span style="padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; 
+                                                         background: #fafafa; color: #424242; border: 1px solid #e0e0e0;">
+                                                <?= date('M d, Y', strtotime($teacher['join_date'])) ?>
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center;">
+                                            <button class="action-btn edit" onclick="editTeacher(<?= $teacher['id'] ?>)" data-translate="edit" title="Edit">Edit</button>
+                                            <button class="action-btn delete" onclick="deleteTeacher(<?= $teacher['id'] ?>)" data-translate="delete" title="Delete">Delete</button>
+                                            <?php if ($teacher['subject_count'] > 0): ?>
+                                                <button class="action-btn view" onclick="toggleTeacherDetails(<?= $teacher['id'] ?>)" data-translate="view" title="View Details">View</button>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                    
+                                    <!-- Teacher Details Row (Expandable) -->
+                                    <tr class="teacher-details-row" id="teacher-details-<?= $teacher['id'] ?>" style="display: none;">
+                                        <td colspan="10" style="padding: 0;">
+                                            <div class="subject-details-container" style="padding: 1.5rem; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);">
+                                                <h4 style="margin: 0 0 1rem 0; color: #1e3a8a; font-size: 1.1rem;">
+                                                    📚 <span data-translate="assigned_subjects">Assigned Subjects</span> - <?= htmlspecialchars($teacher['name']) ?>
+                                                </h4>
+                                                <?php
+                                                $assignments_query = "SELECT ts.*, s.subject_name, s.year as subject_year,
+                                                                            COUNT(DISTINCT ss.student_id) as student_count
+                                                                     FROM teacher_subjects ts
+                                                                     JOIN subjects s ON ts.subject_id = s.id
+                                                                     LEFT JOIN student_subjects ss ON s.id = ss.subject_id
+                                                                     WHERE ts.teacher_id = $1
+                                                                     GROUP BY ts.id, s.subject_name, s.year, ts.year, ts.class_level
+                                                                     ORDER BY ts.year, ts.class_level, s.subject_name";
+                                                $assignments_result = pg_query_params($conn, $assignments_query, array($teacher['id']));
+                                                
+                                                if ($assignments_result && pg_num_rows($assignments_result) > 0):
+                                                ?>
+                                                    <table class="subject-marks-table" style="width: 100%; background: white;">
+                                                        <thead>
+                                                            <tr style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                                                                <th data-translate="subject">Subject</th>
+                                                                <th data-translate="year">Year</th>
+                                                                <th data-translate="class">Class</th>
+                                                                <th data-translate="students">Students</th>
+                                                                <th data-translate="assigned_date">Assigned Date</th>
+                                                                <th data-translate="actions">Actions</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            <?php while($assignment = pg_fetch_assoc($assignments_result)): ?>
+                                                            <tr>
+                                                                <td><strong><?= htmlspecialchars($assignment['subject_name']) ?></strong></td>
+                                                                <td>
+                                                                    <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;
+                                                                                 background: #f5f5f5; color: #000000; border: 1px solid #e0e0e0;">
+                                                                        Year <?= $assignment['year'] ?>
+                                                                    </span>
+                                                                </td>
+                                                                <td>
+                                                                    <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
+                                                                                 background: #f3f4f6; color: #374151;">
+                                                                        <?= $assignment['class_level'] ?>
+                                                                    </span>
+                                                                </td>
+                                                                <td style="text-align: center;"><?= $assignment['student_count'] ?></td>
+                                                                <td><?= date('M d, Y', strtotime($assignment['assigned_date'])) ?></td>
+                                                                <td>
+                                                                    <button class="action-btn delete" onclick="removeTeacherAssignment(<?= $assignment['id'] ?>)" title="Remove Assignment">❌</button>
+                                                                </td>
+                                                            </tr>
+                                                            <?php endwhile; ?>
+                                                        </tbody>
+                                                    </table>
+                                                <?php else: ?>
+                                                    <p style="text-align: center; color: #64748b; padding: 2rem;" data-translate="no_assignments">No subject assignments yet</p>
+                                                <?php endif; ?>
+                                                
+                                                <div style="margin-top: 1rem; text-align: right;">
+                                                    <button class="apply-filters-btn" onclick="openAssignSubjectsModal(<?= $teacher['id'] ?>, '<?= htmlspecialchars($teacher['name']) ?>')">
+                                                        <span data-translate="assign_subjects">Assign Subjects</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    <?php 
+                                        endwhile;
+                                    else:
+                                    ?>
+                                    <tr>
+                                        <td colspan="9" style="text-align: center; color: var(--text-light); padding: 2rem;" data-translate="no_teachers">
+                                            No teachers added yet. Click "Add New Teacher" to get started.
+                                        </td>
+                                    </tr>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
         <?php elseif ($page == 'subjects'): ?>
             <!-- SUBJECTS PAGE -->
             <div class="content-wrapper">
@@ -4743,14 +6029,55 @@ if ($page == 'reports') {
 
                     <!-- Year Filter -->
                     <div class="filter-panel" data-aos="fade-up">
-                        <h3 class="filter-title" data-translate="filter_by_year">Filter by Year</h3>
+                        <h3 class="filter-title" data-translate="filter_subjects">Filter Subjects</h3>
                         <div class="filter-sections">
                             <div class="filter-section">
                                 <label class="filter-label" data-translate="academic_year">Academic Year</label>
-                                <select id="yearFilter" class="premium-select" onchange="filterSubjectsByYear()">
+                                <select id="yearFilter" class="premium-select" onchange="filterSubjects()">
                                     <option value="" data-translate="all_years">All Years</option>
                                     <option value="1" data-translate="year_1">Year 1</option>
                                     <option value="2" data-translate="year_2">Year 2</option>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="filter_by_subject">Filter by Subject</label>
+                                <select id="subjectFilter" class="premium-select" onchange="filterSubjects()">
+                                    <option value="" data-translate="all_subjects">All Subjects</option>
+                                    <?php
+                                    // Get all unique subjects for filter
+                                    $subjects_filter_query = "SELECT DISTINCT subject_name FROM subjects ORDER BY subject_name";
+                                    $subjects_filter_result = pg_query($conn, $subjects_filter_query);
+                                    if ($subjects_filter_result) {
+                                        while($subj = pg_fetch_assoc($subjects_filter_result)) {
+                                            echo "<option value=\"" . htmlspecialchars($subj['subject_name']) . "\">" . htmlspecialchars($subj['subject_name']) . "</option>";
+                                        }
+                                    }
+                                    ?>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="filter_by_class">Filter by Class</label>
+                                <select id="classFilter" class="premium-select" onchange="filterSubjects()">
+                                    <option value="" data-translate="all_classes">All Classes</option>
+                                    <option value="A">Class A</option>
+                                    <option value="B">Class B</option>
+                                    <option value="C">Class C</option>
+                                </select>
+                            </div>
+                            <div class="filter-section">
+                                <label class="filter-label" data-translate="filter_by_teacher">Filter by Teacher</label>
+                                <select id="teacherFilter" class="premium-select" onchange="filterSubjects()">
+                                    <option value="" data-translate="all_teachers">All Teachers</option>
+                                    <?php
+                                    // Get all teachers for filter
+                                    $teachers_filter_query = "SELECT id, name FROM teachers ORDER BY name";
+                                    $teachers_filter_result = pg_query($conn, $teachers_filter_query);
+                                    if ($teachers_filter_result) {
+                                        while($teacher = pg_fetch_assoc($teachers_filter_result)) {
+                                            echo "<option value=\"" . htmlspecialchars($teacher['name']) . "\">" . htmlspecialchars($teacher['name']) . "</option>";
+                                        }
+                                    }
+                                    ?>
                                 </select>
                             </div>
                         </div>
@@ -4774,6 +6101,7 @@ if ($page == 'reports') {
                                         <th data-translate="description">Description</th>
                                         <th data-translate="credits">Credits</th>
                                         <th data-translate="academic_year">Year</th>
+                                        <th data-translate="teacher">Teacher</th>
                                         <th data-translate="total_enrolls">Total Enrolls</th>
                                         <th data-translate="actions">Actions</th>
                                     </tr>
@@ -4783,10 +6111,15 @@ if ($page == 'reports') {
                                     $subjects_query = "
                                         SELECT 
                                             s.*,
-                                            COUNT(DISTINCT m.student_id) as enrollment_count
+                                            COUNT(DISTINCT m.student_id) as enrollment_count,
+                                            t.name as teacher_name,
+                                            t.id as teacher_id,
+                                            ts.class_level as assigned_class
                                         FROM subjects s
                                         LEFT JOIN marks m ON s.id = m.subject_id
-                                        GROUP BY s.id, s.subject_name, s.description, s.credits, s.year
+                                        LEFT JOIN teacher_subjects ts ON s.id = ts.subject_id AND s.year = ts.year
+                                        LEFT JOIN teachers t ON ts.teacher_id = t.id
+                                        GROUP BY s.id, s.subject_name, s.description, s.credits, s.year, t.name, t.id, ts.class_level
                                         ORDER BY s.id
                                     ";
                                     $subjects_result = pg_query($conn, $subjects_query);
@@ -4794,12 +6127,27 @@ if ($page == 'reports') {
                                     if ($subjects_result && pg_num_rows($subjects_result) > 0):
                                         while($subject = pg_fetch_assoc($subjects_result)):
                                     ?>
-                                    <tr data-year="<?= $subject['year'] ?? '' ?>">
+                                    <tr data-year="<?= $subject['year'] ?? '' ?>" 
+                                        data-teacher="<?= htmlspecialchars($subject['teacher_name'] ?? '') ?>"
+                                        data-subject="<?= htmlspecialchars($subject['subject_name'] ?? '') ?>"
+                                        data-class="<?= htmlspecialchars($subject['assigned_class'] ?? '') ?>">
                                         <td><?= $subject['id'] ?></td>
                                         <td><?= htmlspecialchars($subject['subject_name']) ?></td>
                                         <td><?= htmlspecialchars($subject['description'] ?? '') ?></td>
                                         <td><?= $subject['credits'] ?></td>
                                         <td><?= $subject['year'] ? 'Year ' . $subject['year'] : 'N/A' ?></td>
+                                        <td style="text-align: center;">
+                                            <?php if (!empty($subject['teacher_name'])): ?>
+                                                <span style="font-weight: 500;">
+                                                    <?= htmlspecialchars($subject['teacher_name']) ?>
+                                                    <?php if (!empty($subject['assigned_class'])): ?>
+                                                        <span style="font-size: 0.85rem; color: #64748b;"> (Class <?= htmlspecialchars($subject['assigned_class']) ?>)</span>
+                                                    <?php endif; ?>
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="color: #94a3b8; font-size: 0.85rem;">Not Assigned</span>
+                                            <?php endif; ?>
+                                        </td>
                                         <td>
                                             <span style="display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 12px; background: var(--kpi-light-blue); color: white; border-radius: 4px; font-weight: 500; min-width: 90px;">
                                                 <span><?= $subject['enrollment_count'] ?? 0 ?></span>
@@ -4874,6 +6222,22 @@ if ($page == 'reports') {
                                     </select>
                                 </div>
                                 <div class="filter-section">
+                                    <label class="filter-label">Filter by Teacher</label>
+                                    <select id="filterMarksTeacher" class="premium-select" onchange="filterMarks()">
+                                        <option value="">All Teachers</option>
+                                        <?php
+                                        // Get all teachers for filter
+                                        $teachers_filter_query = "SELECT DISTINCT id, name FROM teachers ORDER BY name";
+                                        $teachers_filter_result = pg_query($conn, $teachers_filter_query);
+                                        if ($teachers_filter_result) {
+                                            while($teacher = pg_fetch_assoc($teachers_filter_result)) {
+                                                echo "<option value=\"" . htmlspecialchars($teacher['name']) . "\">" . htmlspecialchars($teacher['name']) . "</option>";
+                                            }
+                                        }
+                                        ?>
+                                    </select>
+                                </div>
+                                <div class="filter-section">
                                     <label class="filter-label">Sort by Final Grade</label>
                                     <select id="sortMarksByGrade" class="premium-select" onchange="filterMarks()">
                                         <option value="">Default</option>
@@ -4908,50 +6272,114 @@ if ($page == 'reports') {
                                 <tbody>
                                     <?php
                                     // Get all students with marks, grouped by student (only active students)
-                                    $students_marks_query = "
-                                        SELECT DISTINCT
-                                            s.id as student_id,
-                                            s.name as student_name,
-                                            s.year as student_year,
-                                            s.class_level,
-                                            s.status as student_status
-                                        FROM students s
-                                        JOIN marks m ON s.id = m.student_id
-                                        WHERE s.status = 'active'
-                                        ORDER BY s.name
-                                    ";
-                                    $students_marks_result = pg_query($conn, $students_marks_query);
+                                    // For teachers: only show students enrolled in their assigned subjects
+                                    if (isTeacher()) {
+                                        $teacher_id = $_SESSION['teacher_id'];
+                                        $students_marks_query = "
+                                            SELECT DISTINCT
+                                                s.id as student_id,
+                                                s.name as student_name,
+                                                s.year as student_year,
+                                                s.class_level,
+                                                s.status as student_status
+                                            FROM students s
+                                            JOIN marks m ON s.id = m.student_id
+                                            JOIN subjects sub ON m.subject_id = sub.id
+                                            JOIN teacher_subjects ts ON sub.id = ts.subject_id AND sub.year = ts.year
+                                            WHERE s.status = 'active' 
+                                            AND ts.teacher_id = $teacher_id
+                                            ORDER BY s.name
+                                        ";
+                                        $students_marks_result = pg_query($conn, $students_marks_query);
+                                    } else {
+                                        // Admin sees all students
+                                        $students_marks_query = "
+                                            SELECT DISTINCT
+                                                s.id as student_id,
+                                                s.name as student_name,
+                                                s.year as student_year,
+                                                s.class_level,
+                                                s.status as student_status
+                                            FROM students s
+                                            JOIN marks m ON s.id = m.student_id
+                                            WHERE s.status = 'active'
+                                            ORDER BY s.name
+                                        ";
+                                        $students_marks_result = pg_query($conn, $students_marks_query);
+                                    }
                                     
                                     if ($students_marks_result && pg_num_rows($students_marks_result) > 0):
                                         while($student = pg_fetch_assoc($students_marks_result)):
                                             $student_id = $student['student_id'];
                                             
-                                            // Get marks for this student
-                                            $marks_for_student_query = "
-                                                SELECT 
-                                                    m.id as mark_id,
-                                                    sub.subject_name,
-                                                    sub.year as subject_year,
-                                                    sub.credits,
-                                                    m.final_exam,
-                                                    m.midterm_exam,
-                                                    m.quizzes,
-                                                    m.daily_activities,
-                                                    m.mark as total_mark,
-                                                    m.final_grade,
-                                                    m.status,
-                                                    CASE 
-                                                        WHEN m.mark >= 90 THEN 'A+'
-                                                        WHEN m.mark >= 80 THEN 'A'
-                                                        WHEN m.mark >= 70 THEN 'B'
-                                                        WHEN m.mark >= 50 THEN 'C'
-                                                        ELSE 'F'
-                                                    END as grade
-                                                FROM marks m
-                                                JOIN subjects sub ON m.subject_id = sub.id
-                                                WHERE m.student_id = $1
-                                                ORDER BY sub.year, sub.subject_name
-                                            ";
+                                            // Get marks for this student with teacher information
+                                            // For teachers: only show subjects they teach
+                                            if (isTeacher()) {
+                                                $teacher_id = $_SESSION['teacher_id'];
+                                                $marks_for_student_query = "
+                                                    SELECT 
+                                                        m.id as mark_id,
+                                                        sub.subject_name,
+                                                        sub.year as subject_year,
+                                                        sub.credits,
+                                                        m.final_exam,
+                                                        m.midterm_exam,
+                                                        m.quizzes,
+                                                        m.daily_activities,
+                                                        m.mark as total_mark,
+                                                        m.final_grade,
+                                                        m.status,
+                                                        t.name as teacher_name,
+                                                        t.id as teacher_id,
+                                                        ts.class_level as assigned_class,
+                                                        CASE 
+                                                            WHEN m.mark >= 90 THEN 'A+'
+                                                            WHEN m.mark >= 80 THEN 'A'
+                                                            WHEN m.mark >= 70 THEN 'B'
+                                                            WHEN m.mark >= 50 THEN 'C'
+                                                            ELSE 'F'
+                                                        END as grade
+                                                    FROM marks m
+                                                    JOIN subjects sub ON m.subject_id = sub.id
+                                                    LEFT JOIN teacher_subjects ts ON sub.id = ts.subject_id AND sub.year = ts.year
+                                                    LEFT JOIN teachers t ON ts.teacher_id = t.id
+                                                    WHERE m.student_id = $1
+                                                    AND ts.teacher_id = $teacher_id
+                                                    ORDER BY sub.year, sub.subject_name
+                                                ";
+                                            } else {
+                                                // Admin sees all subjects
+                                                $marks_for_student_query = "
+                                                    SELECT 
+                                                        m.id as mark_id,
+                                                        sub.subject_name,
+                                                        sub.year as subject_year,
+                                                        sub.credits,
+                                                        m.final_exam,
+                                                        m.midterm_exam,
+                                                        m.quizzes,
+                                                        m.daily_activities,
+                                                        m.mark as total_mark,
+                                                        m.final_grade,
+                                                        m.status,
+                                                        t.name as teacher_name,
+                                                        t.id as teacher_id,
+                                                        ts.class_level as assigned_class,
+                                                        CASE 
+                                                            WHEN m.mark >= 90 THEN 'A+'
+                                                            WHEN m.mark >= 80 THEN 'A'
+                                                            WHEN m.mark >= 70 THEN 'B'
+                                                            WHEN m.mark >= 50 THEN 'C'
+                                                            ELSE 'F'
+                                                        END as grade
+                                                    FROM marks m
+                                                    JOIN subjects sub ON m.subject_id = sub.id
+                                                    LEFT JOIN teacher_subjects ts ON sub.id = ts.subject_id AND sub.year = ts.year
+                                                    LEFT JOIN teachers t ON ts.teacher_id = t.id
+                                                    WHERE m.student_id = $1
+                                                    ORDER BY sub.year, sub.subject_name
+                                                ";
+                                            }
                                             $marks_params = array($student_id);
                                             $marks_for_student_result = pg_query_params($conn, $marks_for_student_query, $marks_params);
                                             $student_marks = pg_fetch_all($marks_for_student_result);
@@ -4960,6 +6388,7 @@ if ($page == 'reports') {
                                             // Group marks by year and calculate totals
                                             $marks_by_year = [];
                                             $year_totals = [];
+                                            $teacher_names = []; // Collect all teacher names for this student
                                             if ($student_marks) {
                                                 foreach ($student_marks as $mark) {
                                                     $year = $mark['subject_year'];
@@ -4969,8 +6398,14 @@ if ($page == 'reports') {
                                                     }
                                                     $marks_by_year[$year][] = $mark;
                                                     $year_totals[$year] += floatval($mark['final_grade']);
+                                                    
+                                                    // Collect unique teacher names
+                                                    if (!empty($mark['teacher_name']) && !in_array($mark['teacher_name'], $teacher_names)) {
+                                                        $teacher_names[] = $mark['teacher_name'];
+                                                    }
                                                 }
                                             }
+                                            $teachers_list = implode(', ', $teacher_names); // Join all teachers
                                             
                                             // Calculate student's year-specific final grade
                                             $graduation_result = calculateGraduationGrade($conn, $student_id);
@@ -4988,7 +6423,8 @@ if ($page == 'reports') {
                                         data-student-id="<?= $student_id ?>"
                                         data-year="<?= $student['student_year'] ?>" 
                                         data-student-status="<?= $student['student_status'] ?>" 
-                                        data-class="<?= $student['class_level'] ?>">
+                                        data-class="<?= $student['class_level'] ?>"
+                                        data-teachers="<?= htmlspecialchars($teachers_list) ?>">
                                         <td>
                                             <div class="student-name-cell">
                                                 <span class="expand-icon">▶</span>
@@ -5032,6 +6468,7 @@ if ($page == 'reports') {
                                                     <thead>
                                                         <tr>
                                                             <th data-translate="subject">Subject</th>
+                                                            <th data-translate="teacher">Teacher</th>
                                                             <th data-translate="final_exam">Final (60)</th>
                                                             <th data-translate="midterm_exam">Midterm (20)</th>
                                                             <th data-translate="quiz">Quiz (10)</th>
@@ -5055,6 +6492,15 @@ if ($page == 'reports') {
                                                                 <td style="text-align: left; font-weight: 500;">
                                                                     <?= htmlspecialchars($mark['subject_name']) ?>
                                                                 </td>
+                                                                <td style="text-align: center;">
+                                                                    <?php if (!empty($mark['teacher_name'])): ?>
+                                                                        <span style="font-weight: 500; color: #334155;">
+                                                                            <?= htmlspecialchars($mark['teacher_name']) ?>
+                                                                        </span>
+                                                                    <?php else: ?>
+                                                                        <span style="color: #94a3b8; font-size: 0.85rem;">Not Assigned</span>
+                                                                    <?php endif; ?>
+                                                                </td>
                                                                 <td><?= intval($mark['final_exam']) ?></td>
                                                                 <td><?= intval($mark['midterm_exam']) ?></td>
                                                                 <td><?= intval($mark['quizzes']) ?></td>
@@ -5069,16 +6515,20 @@ if ($page == 'reports') {
                                                                                  color: <?= $mark['status'] == 'Pass' ? '#166534' : ($mark['status'] == 'Fail' ? '#dc2626' : '#d97706') ?>;">
                                                                         <?= htmlspecialchars($mark['status']) ?>
                                                                     </span>
-                                                            </td>
+                                                                </td>
                                                                 <td>
-                                                                    <button class="inline-edit-btn" onclick="editMark(<?= $mark['mark_id'] ?>)" data-translate="edit">Edit</button>
-                                                                    <button class="inline-delete-btn" onclick="handleMarkAction('delete_mark', <?= $mark['mark_id'] ?>)" title="Reset all marks to 0">Reset</button>
+                                                                    <?php if (isTeacher()): ?>
+                                                                        <button class="inline-edit-btn" onclick="editMark(<?= $mark['mark_id'] ?>)" data-translate="edit">Edit</button>
+                                                                        <button class="inline-delete-btn" onclick="handleMarkAction('delete_mark', <?= $mark['mark_id'] ?>)" title="Reset all marks to 0">Reset</button>
+                                                                    <?php else: ?>
+                                                                        <span style="color: #94a3b8; font-size: 0.85rem; font-style: italic;">View Only</span>
+                                                                    <?php endif; ?>
                                                                 </td>
                                                             </tr>
                                                             <?php endforeach; ?>
                                                             <!-- Year Total Row -->
                                                             <tr style="background: linear-gradient(135deg, <?= $year == 1 ? '#dbeafe' : '#f3e8ff' ?> 0%, <?= $year == 1 ? '#bfdbfe' : '#e9d5ff' ?> 100%); font-weight: 600; border-top: 2px solid <?= $year == 1 ? '#3b82f6' : '#a855f7' ?>;">
-                                                                <td colspan="8" style="text-align: left; padding: 12px; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1rem;">
+                                                                <td colspan="9" style="text-align: left; padding: 12px; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1rem;">
                                                                     📊 Year <?= $year ?> Total Credits
                                                                 </td>
                                                                 <td style="text-align: center; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1.1rem;">
@@ -6514,7 +7964,239 @@ if ($page == 'reports') {
                 updateScheduleYear('1');
                 console.log('Schedule initialized with Year 1 data');
             }
+            
+            // Initialize Teacher Dashboard Charts
+            const teacherDashboardPage = document.querySelector('.content-wrapper');
+            if (teacherDashboardPage && window.location.search.includes('page=teacher_dashboard')) {
+                initializeTeacherDashboardCharts();
+            }
         });
+        
+        // Teacher Dashboard Chart Initialization
+        function initializeTeacherDashboardCharts() {
+            <?php
+            // Get data for teacher dashboard charts
+            $spec_query = "SELECT specialization, COUNT(*) as count FROM teachers WHERE specialization IS NOT NULL GROUP BY specialization ORDER BY count DESC";
+            $spec_result = pg_query($conn, $spec_query);
+            $specializations = [];
+            $spec_counts = [];
+            while ($row = pg_fetch_assoc($spec_result)) {
+                $specializations[] = $row['specialization'];
+                $spec_counts[] = (int)$row['count'];
+            }
+            
+            $degree_query = "SELECT degree, COUNT(*) as count FROM teachers WHERE degree IS NOT NULL GROUP BY degree ORDER BY count DESC";
+            $degree_result = pg_query($conn, $degree_query);
+            $degrees = [];
+            $degree_counts = [];
+            while ($row = pg_fetch_assoc($degree_result)) {
+                $degrees[] = $row['degree'];
+                $degree_counts[] = (int)$row['count'];
+            }
+            
+            $login_active = pg_fetch_assoc(pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NOT NULL AND password IS NOT NULL"))['count'];
+            $login_inactive = pg_fetch_assoc(pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NULL OR password IS NULL"))['count'];
+            
+            $subject_assign_query = "SELECT t.name, COUNT(DISTINCT ts.subject_id) as subject_count 
+                                    FROM teachers t 
+                                    LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id 
+                                    GROUP BY t.id, t.name 
+                                    ORDER BY subject_count DESC 
+                                    LIMIT 10";
+            $subject_assign_result = pg_query($conn, $subject_assign_query);
+            $teacher_names = [];
+            $subject_counts = [];
+            while ($row = pg_fetch_assoc($subject_assign_result)) {
+                $teacher_names[] = $row['name'];
+                $subject_counts[] = (int)$row['subject_count'];
+            }
+            ?>
+            
+            // Teacher Specialization Chart
+            const specCtx = document.getElementById('teacherSpecializationChart');
+            if (specCtx) {
+                new Chart(specCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: <?= json_encode($specializations) ?>,
+                        datasets: [{
+                            data: <?= json_encode($spec_counts) ?>,
+                            backgroundColor: [
+                                '#667eea', '#764ba2', '#f093fb', '#4facfe',
+                                '#43e97b', '#fa709a', '#fee140', '#30cfd0',
+                                '#a8edea', '#fed6e3', '#c471f5', '#12c2e9'
+                            ],
+                            borderWidth: 2,
+                            borderColor: '#ffffff'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: {
+                                    font: { family: "'Poppins', sans-serif", size: 12 },
+                                    padding: 15,
+                                    color: '#334155'
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(37, 46, 69, 0.95)',
+                                titleFont: { family: "'Poppins', sans-serif", size: 14, weight: '600' },
+                                bodyFont: { family: "'Poppins', sans-serif", size: 13 },
+                                padding: 12,
+                                cornerRadius: 8
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Teacher Degree Chart
+            const degreeCtx = document.getElementById('teacherDegreeChart');
+            if (degreeCtx) {
+                new Chart(degreeCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: <?= json_encode($degrees) ?>,
+                        datasets: [{
+                            label: 'Teachers',
+                            data: <?= json_encode($degree_counts) ?>,
+                            backgroundColor: 'rgba(102, 126, 234, 0.8)',
+                            borderColor: 'rgba(102, 126, 234, 1)',
+                            borderWidth: 2,
+                            borderRadius: 8
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                backgroundColor: 'rgba(37, 46, 69, 0.95)',
+                                titleFont: { family: "'Poppins', sans-serif", size: 14, weight: '600' },
+                                bodyFont: { family: "'Poppins', sans-serif", size: 13 },
+                                padding: 12,
+                                cornerRadius: 8
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: {
+                                    font: { family: "'Poppins', sans-serif", size: 11 },
+                                    color: '#64748b',
+                                    stepSize: 1
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            },
+                            x: {
+                                ticks: {
+                                    font: { family: "'Poppins', sans-serif", size: 10 },
+                                    color: '#64748b'
+                                },
+                                grid: { display: false }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Login Status Chart
+            const loginCtx = document.getElementById('loginStatusChart');
+            if (loginCtx) {
+                new Chart(loginCtx, {
+                    type: 'pie',
+                    data: {
+                        labels: ['Active Login', 'No Login Set'],
+                        datasets: [{
+                            data: [<?= $login_active ?>, <?= $login_inactive ?>],
+                            backgroundColor: ['#10b981', '#ef4444'],
+                            borderWidth: 2,
+                            borderColor: '#ffffff'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: {
+                                    font: { family: "'Poppins', sans-serif", size: 12, weight: '600' },
+                                    padding: 15,
+                                    color: '#334155'
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(37, 46, 69, 0.95)',
+                                titleFont: { family: "'Poppins', sans-serif", size: 14, weight: '600' },
+                                bodyFont: { family: "'Poppins', sans-serif", size: 13 },
+                                padding: 12,
+                                cornerRadius: 8
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Subject Assignments Chart
+            const assignCtx = document.getElementById('subjectAssignmentsChart');
+            if (assignCtx) {
+                new Chart(assignCtx, {
+                    type: 'horizontalBar',
+                    data: {
+                        labels: <?= json_encode($teacher_names) ?>,
+                        datasets: [{
+                            label: 'Subjects Taught',
+                            data: <?= json_encode($subject_counts) ?>,
+                            backgroundColor: 'rgba(59, 130, 246, 0.8)',
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            borderWidth: 2,
+                            borderRadius: 6
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                backgroundColor: 'rgba(37, 46, 69, 0.95)',
+                                titleFont: { family: "'Poppins', sans-serif", size: 14, weight: '600' },
+                                bodyFont: { family: "'Poppins', sans-serif", size: 13 },
+                                padding: 12,
+                                cornerRadius: 8
+                            }
+                        },
+                        scales: {
+                            x: {
+                                beginAtZero: true,
+                                ticks: {
+                                    font: { family: "'Poppins', sans-serif", size: 11 },
+                                    color: '#64748b',
+                                    stepSize: 1
+                                },
+                                grid: { color: 'rgba(0,0,0,0.05)' }
+                            },
+                            y: {
+                                ticks: {
+                                    font: { family: "'Poppins', sans-serif", size: 10 },
+                                    color: '#64748b'
+                                },
+                                grid: { display: false }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            console.log('Teacher dashboard charts initialized successfully!');
+        }
 
         // Schedule functions
         function showClassSchedule(classLetter) {
@@ -8858,6 +10540,7 @@ if ($page == 'reports') {
             const yearFilter = document.getElementById('filterMarksYear').value;
             const classFilter = document.getElementById('filterMarksClass').value;
             const subjectFilter = document.getElementById('filterMarksSubject').value;
+            const teacherFilter = document.getElementById('filterMarksTeacher') ? document.getElementById('filterMarksTeacher').value : '';
             const sortByGrade = document.getElementById('sortMarksByGrade').value;
             
             const table = document.getElementById('marksTable');
@@ -8876,9 +10559,10 @@ if ($page == 'reports') {
                 
                 const studentName = cells[0].textContent.toLowerCase();
                 
-                // Get year and class from data attributes
+                // Get year, class, and teachers from data attributes
                 const rowYear = row.getAttribute('data-year');
                 const rowClass = row.getAttribute('data-class');
+                const rowTeachers = row.getAttribute('data-teachers') || '';
                 
                 // Get final grade for sorting
                 const finalGradeCell = cells[4]; // Final Grade column
@@ -8905,9 +10589,10 @@ if ($page == 'reports') {
                 const matchesYear = yearFilter === '' || rowYear === yearFilter;
                 const matchesClass = classFilter === '' || rowClass === classFilter;
                 const matchesSubject = subjectFilter === '' || hasSubject;
+                const matchesTeacher = teacherFilter === '' || rowTeachers.includes(teacherFilter);
                 
                 // Show/hide row based on all criteria
-                if (matchesSearch && matchesYear && matchesClass && matchesSubject) {
+                if (matchesSearch && matchesYear && matchesClass && matchesSubject && matchesTeacher) {
                     row.style.display = '';
                     if (detailsRow) detailsRow.style.display = '';
                     visibleCount++;
@@ -8973,6 +10658,9 @@ if ($page == 'reports') {
             document.getElementById('filterMarksYear').value = '';
             document.getElementById('filterMarksClass').value = '';
             document.getElementById('filterMarksSubject').value = '';
+            if (document.getElementById('filterMarksTeacher')) {
+                document.getElementById('filterMarksTeacher').value = '';
+            }
             document.getElementById('sortMarksByGrade').value = '';
             
             updateMarksSubjectFilter();
@@ -9460,17 +11148,31 @@ if ($page == 'reports') {
             filterStudents();
         }
 
-        function filterSubjectsByYear() {
+        function filterSubjects() {
             const yearFilter = document.getElementById('yearFilter').value;
+            const subjectFilter = document.getElementById('subjectFilter').value;
+            const classFilter = document.getElementById('classFilter').value;
+            const teacherFilter = document.getElementById('teacherFilter').value;
             const table = document.getElementById('subjectsTable');
             const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+            
+            // Update subject and class filter options based on selected year
+            updateYearSpecificFilters(yearFilter);
             
             let visibleCount = 0;
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
                 const yearData = row.getAttribute('data-year');
+                const subjectData = row.getAttribute('data-subject') || '';
+                const classData = row.getAttribute('data-class') || '';
+                const teacherData = row.getAttribute('data-teacher') || '';
                 
-                if (yearFilter === '' || yearData === yearFilter) {
+                const matchesYear = yearFilter === '' || yearData === yearFilter;
+                const matchesSubject = subjectFilter === '' || subjectData === subjectFilter;
+                const matchesClass = classFilter === '' || classData === classFilter;
+                const matchesTeacher = teacherFilter === '' || teacherData === teacherFilter;
+                
+                if (matchesYear && matchesSubject && matchesClass && matchesTeacher) {
                     row.style.display = '';
                     visibleCount++;
                 } else {
@@ -9480,6 +11182,100 @@ if ($page == 'reports') {
             
             // Update counter if it exists
             updateSubjectsCounter(visibleCount);
+        }
+        
+        function updateYearSpecificFilters(selectedYear) {
+            const table = document.getElementById('subjectsTable');
+            const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+            
+            const subjectFilterSelect = document.getElementById('subjectFilter');
+            const classFilterSelect = document.getElementById('classFilter');
+            const currentSubject = subjectFilterSelect.value;
+            const currentClass = classFilterSelect.value;
+            
+            if (selectedYear === '') {
+                // Show all subjects
+                const availableSubjects = new Set();
+                for (let i = 0; i < rows.length; i++) {
+                    const subjectData = rows[i].getAttribute('data-subject');
+                    if (subjectData) {
+                        availableSubjects.add(subjectData);
+                    }
+                }
+                
+                let subjectsHTML = '<option value="">All Subjects</option>';
+                Array.from(availableSubjects).sort().forEach(subject => {
+                    subjectsHTML += `<option value="${subject}">${subject}</option>`;
+                });
+                subjectFilterSelect.innerHTML = subjectsHTML;
+                
+                // Show all classes
+                classFilterSelect.innerHTML = `
+                    <option value="">All Classes</option>
+                    <option value="A">Class A</option>
+                    <option value="B">Class B</option>
+                    <option value="C">Class C</option>
+                `;
+            } else {
+                // Get available subjects and classes for the selected year
+                const availableSubjects = new Set();
+                const availableClasses = new Set();
+                
+                for (let i = 0; i < rows.length; i++) {
+                    const row = rows[i];
+                    const yearData = row.getAttribute('data-year');
+                    
+                    if (yearData === selectedYear) {
+                        const subjectData = row.getAttribute('data-subject');
+                        const classData = row.getAttribute('data-class');
+                        
+                        if (subjectData) {
+                            availableSubjects.add(subjectData);
+                        }
+                        if (classData) {
+                            availableClasses.add(classData);
+                        }
+                    }
+                }
+                
+                // Build subject options
+                let subjectsHTML = '<option value="">All Subjects</option>';
+                Array.from(availableSubjects).sort().forEach(subject => {
+                    subjectsHTML += `<option value="${subject}">${subject}</option>`;
+                });
+                subjectFilterSelect.innerHTML = subjectsHTML;
+                
+                // Build class options
+                let classesHTML = '<option value="">All Classes</option>';
+                ['A', 'B', 'C'].forEach(cls => {
+                    if (availableClasses.has(cls)) {
+                        classesHTML += `<option value="${cls}">Class ${cls}</option>`;
+                    }
+                });
+                classFilterSelect.innerHTML = classesHTML;
+            }
+            
+            // Restore previous selections if still available
+            const subjectOptions = subjectFilterSelect.options;
+            for (let i = 0; i < subjectOptions.length; i++) {
+                if (subjectOptions[i].value === currentSubject) {
+                    subjectFilterSelect.value = currentSubject;
+                    break;
+                }
+            }
+            
+            const classOptions = classFilterSelect.options;
+            for (let i = 0; i < classOptions.length; i++) {
+                if (classOptions[i].value === currentClass) {
+                    classFilterSelect.value = currentClass;
+                    break;
+                }
+            }
+        }
+        
+        // Keep old function name for compatibility
+        function filterSubjectsByYear() {
+            filterSubjects();
         }
 
         function updateSubjectsCounter(count) {
@@ -9944,6 +11740,35 @@ if ($page == 'reports') {
                 top_performing_class: "Top Performing Class",
                 manage_student_info: "Manage student information and enrollment",
                 input_manage_marks: "Input and manage student marks",
+                // Teacher Management Translations
+                nav_teachers: "Teachers",
+                teachers_title: "Teachers Management",
+                manage_teacher_info: "Manage teachers and subject assignments",
+                add_new_teacher: "Add New Teacher",
+                teachers_list: "Teachers List",
+                teacher: "Teacher",
+                teachers: "Teachers",
+                specialization: "Specialization",
+                select_specialization: "Select Specialization",
+                assigned_subjects: "Assigned Subjects",
+                join_date: "Join Date",
+                add_teacher: "Add Teacher",
+                edit_teacher: "Edit Teacher",
+                delete_teacher: "Delete Teacher",
+                view_teacher: "View Teacher",
+                assign_subjects: "Assign Subjects",
+                remove_assignment: "Remove Assignment",
+                teacher_email: "teacher@school.edu",
+                filter_specialization: "Filter by Specialization",
+                search_teachers: "Search by name, email...",
+                no_teachers: "No teachers added yet. Click 'Add New Teacher' to get started.",
+                no_assignments: "No Assignments",
+                assigned_date: "Assigned Date",
+                filter_status: "Filter by Status",
+                active: "Active",
+                inactive: "Inactive",
+                all: "All",
+                // End Teacher Translations
                 marks_list: "📝 Marks List",
                 search_filter_marks: "Search & Filter Marks",
                 add_mark: "Add Mark",
@@ -10176,6 +12001,35 @@ if ($page == 'reports') {
                 top_performing_class: "أفضل صف أداءً",
                 manage_student_info: "إدارة معلومات الطلاب والتسجيل",
                 input_manage_marks: "إدخال وإدارة درجات الطلاب",
+                // Teacher Management Translations
+                nav_teachers: "المعلمون",
+                teachers_title: "إدارة المعلمين",
+                manage_teacher_info: "إدارة المعلمين وتعيين المواد",
+                add_new_teacher: "إضافة معلم جديد",
+                teachers_list: "قائمة المعلمين",
+                teacher: "المعلم",
+                teachers: "المعلمون",
+                specialization: "التخصص",
+                select_specialization: "اختر التخصص",
+                assigned_subjects: "المواد المكلف بها",
+                join_date: "تاريخ الانضمام",
+                add_teacher: "إضافة معلم",
+                edit_teacher: "تعديل المعلم",
+                delete_teacher: "حذف المعلم",
+                view_teacher: "عرض المعلم",
+                assign_subjects: "تعيين المواد",
+                remove_assignment: "إزالة التكليف",
+                teacher_email: "teacher@school.edu",
+                filter_specialization: "تصفية حسب التخصص",
+                search_teachers: "البحث بالاسم، البريد...",
+                no_teachers: "لم تتم إضافة معلمين بعد. انقر على 'إضافة معلم جديد' للبدء.",
+                no_assignments: "لا توجد تكليفات",
+                assigned_date: "تاريخ التكليف",
+                filter_status: "تصفية حسب الحالة",
+                active: "نشط",
+                inactive: "غير نشط",
+                all: "الكل",
+                // End Teacher Translations
                 marks_list: "📝 قائمة الدرجات",
                 search_filter_marks: "البحث وتصفية الدرجات",
                 add_mark: "إضافة درجة",
@@ -10412,9 +12266,36 @@ if ($page == 'reports') {
                 overall_performance: "کارایی گشتی",
                 top_performing_class: "باشترین پۆل",
                 manage_student_info: "بەڕێوەبردنی زانیاری قوتابییان و تۆمارکردن",
+                manage_teacher_info: "بەڕێوەبردنی مامۆستایان و دیاریکردنی وانەکان",
                 input_manage_marks: "تۆمارکردن و بەڕێوەبردنی نمرەی قوتابییان",
                 marks_list: "📝 لیستی نمرەکان",
                 search_filter_marks: "گەڕان و پاڵاوتنی نمرەکان",
+                nav_teachers: "مامۆستایان",
+                teachers_title: "بەڕێوەبردنی مامۆستایان",
+                add_new_teacher: "مامۆستای نوێ زیادبکە",
+                teachers_list: "لیستی مامۆستایان",
+                teacher: "مامۆستا",
+                teachers: "مامۆستایان",
+                specialization: "پسپۆڕی",
+                select_specialization: "پسپۆڕی هەڵبژێرە",
+                assigned_subjects: "وانە دیاریکراوەکان",
+                join_date: "بەرواری بەشداریکردن",
+                add_teacher: "مامۆستا زیادبکە",
+                edit_teacher: "دەستکاری مامۆستا",
+                delete_teacher: "سڕینەوەی مامۆستا",
+                view_teacher: "پیشاندانی مامۆستا",
+                assign_subjects: "دیاریکردنی وانەکان",
+                remove_assignment: "لابردنی دیاریکراو",
+                teacher_email: "ئیمەیڵی مامۆستا",
+                filter_specialization: "پاڵاوتن بە پسپۆڕی",
+                search_teachers: "گەڕان بە ناو، ئیمەیڵ...",
+                no_teachers: "هێشتا هیچ مامۆستایەک زیادنەکراوە. کرتە لە 'مامۆستای نوێ زیادبکە' بکە.",
+                no_assignments: "دیاریکراو نییە",
+                assigned_date: "بەرواری دیاریکردن",
+                filter_status: "پاڵاوتن بە بارودۆخ",
+                active: "چالاک",
+                inactive: "ناچالاک",
+                all: "هەموو",
                 add_mark: "نمرە زیادبکە",
                 student: "قوتابی",
                 subject: "وانە",
@@ -11437,6 +13318,853 @@ if ($page == 'reports') {
             });
         }
 
+        // ===== TEACHER MANAGEMENT FUNCTIONS =====
+        
+        function updateAddTeacherYear() {
+            const subjectSelect = document.getElementById('addTeacherSubject');
+            const yearSelect = document.getElementById('addTeacherYear');
+            
+            if (subjectSelect.value) {
+                const selectedOption = subjectSelect.options[subjectSelect.selectedIndex];
+                const year = selectedOption.getAttribute('data-year');
+                
+                yearSelect.innerHTML = `<option value="${year}" selected>Year ${year}</option>`;
+                yearSelect.disabled = false;
+            } else {
+                yearSelect.innerHTML = '<option value="">Select subject first</option>';
+                yearSelect.disabled = true;
+            }
+        }
+        
+        function handleTeacherFormSubmit(event, form) {
+            event.preventDefault();
+            
+            // Show loader
+            showLoader('Adding teacher...');
+            
+            const formData = new FormData(form);
+            
+            fetch('', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                hideLoader();
+                if (data.success) {
+                    // Check if credentials were returned
+                    if (data.credentials) {
+                        // Show credentials popup
+                        showCredentialsPopup(data.credentials.username, data.credentials.password, form.querySelector('[name="teacher_name"]').value);
+                    } else {
+                        showSuccessMessage(data.message);
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 1000);
+                    }
+                } else {
+                    showErrorMessage(data.message);
+                }
+            })
+            .catch(error => {
+                hideLoader();
+                console.error('Error:', error);
+                showErrorMessage('Failed to add teacher');
+            });
+            
+            return false;
+        }
+        
+        function showCredentialsPopup(username, password, teacherName) {
+            const popup = document.createElement('div');
+            popup.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.7); display: flex; align-items: center;
+                justify-content: center; z-index: 100000; backdrop-filter: blur(4px);
+            `;
+            
+            popup.innerHTML = `
+                <div style="background: white; padding: 2.5rem; border-radius: 16px; max-width: 500px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+                    <div style="text-align: center; margin-bottom: 2rem;">
+                        <div style="font-size: 60px; margin-bottom: 1rem;">✅</div>
+                        <h2 style="margin: 0 0 0.5rem 0; color: #10b981; font-size: 24px;">Teacher Added Successfully!</h2>
+                        <p style="margin: 0; color: #666; font-size: 14px;">Login credentials generated for ${teacherName}</p>
+                    </div>
+                    
+                    <div style="background: #f8f9fa; padding: 1.5rem; border-radius: 12px; margin-bottom: 1.5rem; border-left: 4px solid #10b981;">
+                        <h3 style="margin: 0 0 1rem 0; color: #333; font-size: 16px; font-weight: 600;">🔐 Login Credentials</h3>
+                        
+                        <div style="margin-bottom: 1rem;">
+                            <label style="display: block; color: #666; font-size: 12px; margin-bottom: 0.5rem; font-weight: 500;">Username</label>
+                            <div style="display: flex; gap: 10px; align-items: center;">
+                                <input type="text" id="credUsername" value="${username}" readonly 
+                                    style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace; font-size: 14px; background: white;">
+                                <button onclick="copyToClipboard('credUsername', this)" 
+                                    style="padding: 10px 16px; background: #1e3a8a; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; white-space: nowrap;">
+                                    📋 Copy
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <label style="display: block; color: #666; font-size: 12px; margin-bottom: 0.5rem; font-weight: 500;">Password</label>
+                            <div style="display: flex; gap: 10px; align-items: center;">
+                                <input type="text" id="credPassword" value="${password}" readonly 
+                                    style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace; font-size: 14px; background: white;">
+                                <button onclick="copyToClipboard('credPassword', this)" 
+                                    style="padding: 10px 16px; background: #1e3a8a; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; white-space: nowrap;">
+                                    📋 Copy
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="background: #fff3cd; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; border-left: 4px solid #ffc107;">
+                        <p style="margin: 0; color: #856404; font-size: 13px; line-height: 1.5;">
+                            ⚠️ <strong>Important:</strong> Please share these credentials securely with the teacher. 
+                            They should change the password on first login.
+                        </p>
+                    </div>
+                    
+                    <button onclick="closeCredentialsPopup()" 
+                        style="width: 100%; padding: 14px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); 
+                        color: white; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer;">
+                        Done
+                    </button>
+                </div>
+            `;
+            
+            document.body.appendChild(popup);
+        }
+        
+        function copyToClipboard(inputId, button) {
+            const input = document.getElementById(inputId);
+            input.select();
+            document.execCommand('copy');
+            
+            const originalText = button.innerHTML;
+            button.innerHTML = '✓ Copied!';
+            button.style.background = '#10b981';
+            
+            setTimeout(() => {
+                button.innerHTML = originalText;
+                button.style.background = '#1e3a8a';
+            }, 2000);
+        }
+        
+        function closeCredentialsPopup() {
+            const popups = document.querySelectorAll('[style*="backdrop-filter: blur(4px)"]');
+            popups.forEach(popup => popup.remove());
+            window.location.reload();
+        }
+        
+        function showLoader(message = 'Processing...') {
+            const loader = document.createElement('div');
+            loader.id = 'globalLoader';
+            loader.innerHTML = `
+                <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                     background: rgba(0,0,0,0.7); display: flex; align-items: center; 
+                     justify-content: center; z-index: 99999; backdrop-filter: blur(4px);">
+                    <div style="background: white; padding: 2rem 3rem; border-radius: 12px; 
+                         text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                        <div class="spinner" style="width: 50px; height: 50px; margin: 0 auto 1rem; 
+                             border: 4px solid #f3f3f3; border-top: 4px solid #1e3a8a; 
+                             border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                        <p style="margin: 0; font-weight: 600; color: #1e3a8a; font-size: 1.1rem;">${message}</p>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(loader);
+        }
+        
+        function hideLoader() {
+            const loader = document.getElementById('globalLoader');
+            if (loader) loader.remove();
+        }
+        
+        function showSuccessMessage(message) {
+            const alert = document.createElement('div');
+            alert.style.cssText = `
+                position: fixed; top: 20px; right: 20px; z-index: 100000;
+                background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                color: white; padding: 1rem 1.5rem; border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+                font-weight: 500; animation: slideInRight 0.3s ease;
+            `;
+            alert.textContent = '✓ ' + message;
+            document.body.appendChild(alert);
+            setTimeout(() => alert.remove(), 3000);
+        }
+        
+        function showErrorMessage(message) {
+            const alert = document.createElement('div');
+            alert.style.cssText = `
+                position: fixed; top: 20px; right: 20px; z-index: 100000;
+                background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+                color: white; padding: 1rem 1.5rem; border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+                font-weight: 500; animation: slideInRight 0.3s ease;
+            `;
+            alert.textContent = '✗ ' + message;
+            document.body.appendChild(alert);
+            setTimeout(() => alert.remove(), 4000);
+        }
+        
+        function filterTeachers() {
+            const searchInput = document.getElementById('searchTeacher');
+            const degreeFilter = document.getElementById('filterTeacherDegree');
+            const specFilter = document.getElementById('filterTeacherSpec');
+            const yearFilter = document.getElementById('filterTeacherYear');
+            const classFilter = document.getElementById('filterTeacherClass');
+            
+            if (!searchInput || !degreeFilter || !specFilter) return;
+            
+            const searchValue = searchInput.value.toLowerCase();
+            const degreeValue = degreeFilter.value;
+            const specValue = specFilter.value;
+            const yearValue = yearFilter ? yearFilter.value : '';
+            const classValue = classFilter ? classFilter.value : '';
+            
+            const table = document.getElementById('teachersTable');
+            const rows = table.getElementsByClassName('teacher-row');
+            
+            for (let row of rows) {
+                const name = row.cells[1].textContent.toLowerCase();
+                const email = row.cells[2].textContent.toLowerCase();
+                const phone = row.cells[3].textContent.toLowerCase();
+                const degree = row.getAttribute('data-degree') || '';
+                const spec = row.getAttribute('data-specialization') || '';
+                
+                const matchesSearch = name.includes(searchValue) || email.includes(searchValue) || phone.includes(searchValue);
+                const matchesDegree = !degreeValue || degree === degreeValue;
+                const matchesSpec = !specValue || spec.includes(specValue);
+                
+                // For year and class filtering, we need to check assignments
+                let matchesYear = !yearValue;
+                let matchesClass = !classValue;
+                
+                if (yearValue || classValue) {
+                    const teacherId = row.getAttribute('data-teacher-id');
+                    const detailsRow = document.getElementById('teacher-details-' + teacherId);
+                    if (detailsRow) {
+                        const assignmentRows = detailsRow.querySelectorAll('tbody tr');
+                        for (let assignRow of assignmentRows) {
+                            const yearText = assignRow.cells[1] ? assignRow.cells[1].textContent : '';
+                            const classText = assignRow.cells[2] ? assignRow.cells[2].textContent : '';
+                            
+                            if (!yearValue || yearText.includes('Year ' + yearValue)) {
+                                matchesYear = true;
+                            }
+                            if (!classValue || classText.includes(classValue)) {
+                                matchesClass = true;
+                            }
+                        }
+                    } else {
+                        // If no assignments, don't match year/class filters
+                        matchesYear = !yearValue;
+                        matchesClass = !classValue;
+                    }
+                }
+                
+                if (matchesSearch && matchesDegree && matchesSpec && matchesYear && matchesClass) {
+                    row.style.display = '';
+                    const detailsRow = document.getElementById('teacher-details-' + row.dataset.teacherId);
+                    if (detailsRow && detailsRow.style.display === 'table-row') {
+                        detailsRow.style.display = 'table-row';
+                    }
+                } else {
+                    row.style.display = 'none';
+                    const detailsRow = document.getElementById('teacher-details-' + row.dataset.teacherId);
+                    if (detailsRow) {
+                        detailsRow.style.display = 'none';
+                    }
+                }
+            }
+        }
+        
+        function toggleTeacherDetails(teacherId) {
+            const detailsRow = document.getElementById('teacher-details-' + teacherId);
+            if (detailsRow) {
+                if (detailsRow.style.display === 'none' || detailsRow.style.display === '') {
+                    detailsRow.style.display = 'table-row';
+                } else {
+                    detailsRow.style.display = 'none';
+                }
+            }
+        }
+        
+        function editTeacher(teacherId) {
+            showLoader('Loading teacher data...');
+            
+            // Fetch teacher data
+            fetch('?action=get_teacher&id=' + teacherId)
+                .then(response => response.json())
+                .then(data => {
+                    hideLoader();
+                    if (data.success) {
+                        showEditTeacherModal(data.teacher);
+                    } else {
+                        showErrorMessage(data.message || 'Failed to load teacher data');
+                    }
+                })
+                .catch(error => {
+                    hideLoader();
+                    console.error('Error:', error);
+                    showErrorMessage('Failed to load teacher data');
+                });
+        }
+        
+        function showEditTeacherModal(teacher) {
+            // Escape function to prevent XSS and errors
+            const escape = (str) => {
+                if (!str) return '';
+                const div = document.createElement('div');
+                div.textContent = str;
+                return div.innerHTML;
+            };
+            
+            const modalHTML = `
+                <div id="editTeacherModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                     background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+                    <div style="background: white; padding: 2rem; border-radius: 12px; max-width: 650px; width: 90%; max-height: 90vh; overflow-y: auto;">
+                        <h3 style="margin: 0 0 1.5rem 0; color: #1e3a8a;"><span data-translate="edit_teacher">Edit Teacher</span></h3>
+                        <form id="editTeacherForm" onsubmit="submitEditTeacher(event, ${teacher.id})">
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="full_name">Full Name</label>
+                                <input type="text" name="teacher_name" value="${escape(teacher.name)}" class="premium-select" required style="width: 100%;">
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="email">Email</label>
+                                <input type="email" name="email" value="${escape(teacher.email)}" class="premium-select" required style="width: 100%;">
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="phone">Phone</label>
+                                <input type="tel" name="phone" value="${escape(teacher.phone || '')}" class="premium-select" style="width: 100%;">
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="specialization">Specialization</label>
+                                <select name="specialization" class="premium-select" required style="width: 100%;">
+                                    <option value="Mathematics" ${teacher.specialization === 'Mathematics' ? 'selected' : ''}>Mathematics</option>
+                                    <option value="Physics" ${teacher.specialization === 'Physics' ? 'selected' : ''}>Physics</option>
+                                    <option value="Chemistry" ${teacher.specialization === 'Chemistry' ? 'selected' : ''}>Chemistry</option>
+                                    <option value="Biology" ${teacher.specialization === 'Biology' ? 'selected' : ''}>Biology</option>
+                                    <option value="English" ${teacher.specialization === 'English' ? 'selected' : ''}>English</option>
+                                    <option value="Arabic" ${teacher.specialization === 'Arabic' ? 'selected' : ''}>Arabic</option>
+                                    <option value="Kurdish" ${teacher.specialization === 'Kurdish' ? 'selected' : ''}>Kurdish</option>
+                                    <option value="Computer Science" ${teacher.specialization === 'Computer Science' ? 'selected' : ''}>Computer Science</option>
+                                    <option value="History" ${teacher.specialization === 'History' ? 'selected' : ''}>History</option>
+                                    <option value="Geography" ${teacher.specialization === 'Geography' ? 'selected' : ''}>Geography</option>
+                                    <option value="Islamic Studies" ${teacher.specialization === 'Islamic Studies' ? 'selected' : ''}>Islamic Studies</option>
+                                    <option value="Physical Education" ${teacher.specialization === 'Physical Education' ? 'selected' : ''}>Physical Education</option>
+                                    <option value="Arts" ${teacher.specialization === 'Arts' ? 'selected' : ''}>Arts</option>
+                                    <option value="Management" ${teacher.specialization === 'Management' ? 'selected' : ''}>Management</option>
+                                </select>
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="degree">Degree</label>
+                                <select name="degree" class="premium-select" required style="width: 100%;">
+                                    <option value="High School Diploma" ${teacher.degree === 'High School Diploma' ? 'selected' : ''}>High School Diploma</option>
+                                    <option value="Associate Degree" ${teacher.degree === 'Associate Degree' ? 'selected' : ''}>Associate Degree</option>
+                                    <option value="Bachelor's Degree" ${teacher.degree === "Bachelor's Degree" ? 'selected' : ''}>Bachelor's Degree</option>
+                                    <option value="Master's Degree" ${teacher.degree === "Master's Degree" ? 'selected' : ''}>Master's Degree</option>
+                                    <option value="Doctorate (PhD)" ${teacher.degree === 'Doctorate (PhD)' ? 'selected' : ''}>Doctorate (PhD)</option>
+                                    <option value="Professional Certificate" ${teacher.degree === 'Professional Certificate' ? 'selected' : ''}>Professional Certificate</option>
+                                </select>
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="salary">Monthly Salary (IQD)</label>
+                                <input type="number" name="salary" value="${teacher.salary || ''}" class="premium-select" style="width: 100%;" min="0" step="1000">
+                            </div>
+                            <div style="margin-bottom: 1.5rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="join_date">Join Date</label>
+                                <input type="date" name="join_date" value="${teacher.join_date}" class="premium-select" style="width: 100%;">
+                            </div>
+                            <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+                                <button type="button" onclick="closeEditTeacherModal()" class="export-btn" style="background: #6b7280;" data-translate="cancel">Cancel</button>
+                                <button type="submit" class="apply-filters-btn" data-translate="update">Update</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+            
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+        }
+        
+        function closeEditTeacherModal() {
+            const modal = document.getElementById('editTeacherModal');
+            if (modal) modal.remove();
+        }
+        
+        function submitEditTeacher(event, teacherId) {
+            event.preventDefault();
+            showLoader('Updating teacher...');
+            
+            const form = event.target;
+            const formData = new FormData(form);
+            formData.append('action', 'update_teacher');
+            formData.append('teacher_id', teacherId);
+            
+            fetch('', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                hideLoader();
+                closeEditTeacherModal();
+                if (data.success) {
+                    showSuccessMessage(data.message);
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                } else {
+                    showErrorMessage(data.message);
+                }
+            })
+            .catch(error => {
+                hideLoader();
+                console.error('Error:', error);
+                showErrorMessage('Failed to update teacher');
+            });
+        }
+        
+        function deleteTeacher(teacherId) {
+            const translations = {
+                en: 'Are you sure you want to delete this teacher? This action cannot be undone.',
+                ar: 'هل أنت متأكد من حذف هذا المعلم؟ لا يمكن التراجع عن هذا الإجراء.',
+                ku: 'دڵنیای لە سڕینەوەی ئەم مامۆستایە؟ ناتوانی ئەم کردارە بگەڕێنیتەوە.'
+            };
+            
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            const confirmMessage = translations[currentLang] || translations.en;
+            
+            if (confirm(confirmMessage)) {
+                showLoader('Deleting teacher...');
+                
+                const formData = new FormData();
+                formData.append('action', 'delete_teacher');
+                formData.append('teacher_id', teacherId);
+                
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    hideLoader();
+                    if (data.success) {
+                        showSuccessMessage(data.message);
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 1000);
+                    } else {
+                        showErrorMessage(data.message);
+                    }
+                })
+                .catch(error => {
+                    hideLoader();
+                    console.error('Error:', error);
+                    showErrorMessage('Failed to delete teacher');
+                });
+            }
+        }
+        
+        // Generate login credentials for teacher
+        // Teacher Access Management Functions
+        function openCredentialModal(teacherId, teacherName, currentUsername) {
+            document.getElementById('credential_teacher_id').value = teacherId;
+            document.getElementById('credential_teacher_name').value = teacherName;
+            document.getElementById('credential_username').value = currentUsername || '';
+            document.getElementById('credential_password').value = '';
+            
+            const modalTitle = currentUsername ? 'Update Teacher Access' : 'Create Teacher Access';
+            document.getElementById('modalTitle').textContent = modalTitle;
+            
+            document.getElementById('credentialModal').style.display = 'block';
+        }
+        
+        function closeCredentialModal() {
+            document.getElementById('credentialModal').style.display = 'none';
+            document.getElementById('credentialForm').reset();
+        }
+        
+        function saveTeacherCredentials(event) {
+            event.preventDefault();
+            
+            const formData = new FormData(event.target);
+            formData.append('action', 'generate_teacher_credentials');
+            
+            showLoader('Saving credentials...');
+            
+            fetch('', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                hideLoader();
+                if (data.success) {
+                    showSuccessMessage(data.message);
+                    closeCredentialModal();
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                } else {
+                    showErrorMessage(data.message);
+                }
+            })
+            .catch(error => {
+                hideLoader();
+                console.error('Error:', error);
+                showErrorMessage('Failed to save credentials');
+            });
+            
+            return false;
+        }
+        
+        function filterTeacherAccess() {
+            const searchValue = document.getElementById('searchTeacherAccess').value.toLowerCase();
+            const specValue = document.getElementById('filterSpecialization').value;
+            const statusValue = document.getElementById('filterLoginStatus').value;
+            const degreeValue = document.getElementById('filterDegree').value;
+            
+            const rows = document.querySelectorAll('.teacher-access-row');
+            
+            rows.forEach(row => {
+                const name = row.dataset.name || '';
+                const specialization = row.dataset.specialization || '';
+                const degree = row.dataset.degree || '';
+                const status = row.dataset.status || '';
+                
+                const matchesSearch = name.includes(searchValue);
+                const matchesSpec = !specValue || specialization === specValue;
+                const matchesStatus = !statusValue || status === statusValue;
+                const matchesDegree = !degreeValue || degree === degreeValue;
+                
+                if (matchesSearch && matchesSpec && matchesStatus && matchesDegree) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+        
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('credentialModal');
+            if (event.target == modal) {
+                closeCredentialModal();
+            }
+        }
+        
+        function removeTeacherAssignment(assignmentId) {
+            const translations = {
+                en: 'Remove this subject assignment?',
+                ar: 'إزالة تعيين هذه المادة؟',
+                ku: 'لابردنی دیاریکردنی ئەم وانەیە؟'
+            };
+            
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            const confirmMessage = translations[currentLang] || translations.en;
+            
+            if (confirm(confirmMessage)) {
+                showLoader('Removing assignment...');
+                
+                const formData = new FormData();
+                formData.append('action', 'remove_teacher_assignment');
+                formData.append('assignment_id', assignmentId);
+                
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    hideLoader();
+                    if (data.success) {
+                        showSuccessMessage(data.message);
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 1000);
+                    } else {
+                        showErrorMessage(data.message);
+                    }
+                })
+                .catch(error => {
+                    hideLoader();
+                    console.error('Error:', error);
+                    showErrorMessage('Failed to remove assignment');
+                });
+            }
+        }
+        
+        function printTeachers() {
+            const table = document.getElementById('teachersTable');
+            const rows = Array.from(table.querySelectorAll('tbody tr.teacher-row'));
+            const visibleRows = rows.filter(row => row.style.display !== 'none');
+            
+            if (visibleRows.length === 0) {
+                alert('No data to print');
+                return;
+            }
+            
+            // Calculate statistics
+            const total = visibleRows.length;
+            const degrees = {};
+            const specializations = {};
+            let totalSalary = 0;
+            let salaryCount = 0;
+            
+            visibleRows.forEach(row => {
+                const degree = row.getAttribute('data-degree') || 'N/A';
+                const spec = row.getAttribute('data-specialization') || 'N/A';
+                degrees[degree] = (degrees[degree] || 0) + 1;
+                specializations[spec] = (specializations[spec] || 0) + 1;
+                
+                // Extract salary
+                const salaryCell = row.querySelectorAll('td')[6];
+                if (salaryCell) {
+                    const salaryText = salaryCell.textContent.replace(/[^0-9]/g, '');
+                    const salary = parseInt(salaryText);
+                    if (salary > 0) {
+                        totalSalary += salary;
+                        salaryCount++;
+                    }
+                }
+            });
+            
+            const avgSalary = salaryCount > 0 ? (totalSalary / salaryCount) : 0;
+            
+            // Generate filter description
+            const degreeFilter = document.getElementById('filterTeacherDegree').value;
+            const specFilter = document.getElementById('filterTeacherSpec').value;
+            const yearFilter = document.getElementById('filterTeacherYear').value;
+            const classFilter = document.getElementById('filterTeacherClass').value;
+            
+            let reportDescription = 'This report presents a comprehensive overview of teachers ';
+            let filters = [];
+            
+            if (degreeFilter) filters.push(`with ${degreeFilter}`);
+            if (specFilter) filters.push(`specializing in ${specFilter}`);
+            if (yearFilter) filters.push(`teaching Year ${yearFilter}`);
+            if (classFilter) filters.push(`assigned to Class ${classFilter}`);
+            
+            if (filters.length > 0) {
+                reportDescription += filters.join(', ') + '. ';
+            } else {
+                reportDescription += 'currently registered in the system. ';
+            }
+            
+            reportDescription += `The report includes detailed information about each teacher's contact details, academic qualifications, specialization area, salary information, and teaching assignments. `;
+            reportDescription += `This document serves as an official record for administrative purposes and can be used for HR management, budgeting, and resource planning. `;
+            
+            if (salaryCount > 0) {
+                reportDescription += `Financial Summary: Average monthly salary is ${avgSalary.toLocaleString()} IQD, with total monthly salary expenditure of ${totalSalary.toLocaleString()} IQD across ${salaryCount} teachers. `;
+            }
+            
+            reportDescription += `Total number of teachers: ${total}. `;
+            
+            // Most common degree and specialization
+            const topDegree = Object.keys(degrees).reduce((a, b) => degrees[a] > degrees[b] ? a : b, '');
+            const topSpec = Object.keys(specializations).reduce((a, b) => specializations[a] > specializations[b] ? a : b, '');
+            reportDescription += `Most common qualification: ${topDegree} (${degrees[topDegree]} teachers). `;
+            reportDescription += `Most common specialization: ${topSpec} (${specializations[topSpec]} teachers).`;
+            
+            // Clone and clean table
+            const tableClone = table.cloneNode(true);
+            const cloneRows = tableClone.querySelectorAll('tbody tr');
+            cloneRows.forEach(row => {
+                if (row.style.display === 'none' || row.classList.contains('teacher-details-row')) {
+                    row.remove();
+                    return;
+                }
+                // Remove Actions column
+                const actionCell = row.querySelector('td:last-child');
+                if (actionCell && actionCell.querySelector('button')) {
+                    actionCell.remove();
+                }
+            });
+            
+            // Remove Actions header
+            const headerCells = tableClone.querySelectorAll('thead th');
+            if (headerCells.length > 0) {
+                headerCells[headerCells.length - 1].remove();
+            }
+            
+            const teachersHTML = `
+                <div class="report-summary">
+                    <h3>REPORT SUMMARY</h3>
+                    <p>${reportDescription}</p>
+                </div>
+                
+                ${tableClone.outerHTML}
+            `;
+            
+            const additionalStyles = `
+                .report-summary {
+                    background: #f5f5f5;
+                    border: 2px solid #000;
+                    padding: 15px;
+                    margin-bottom: 20px;
+                    page-break-inside: avoid;
+                }
+                
+                .report-summary h3 {
+                    margin: 0 0 10px 0;
+                    font-size: 14px;
+                    font-weight: bold;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                
+                .report-summary p {
+                    margin: 0;
+                    font-size: 11px;
+                    line-height: 1.6;
+                    text-align: justify;
+                }
+                
+                td {
+                    text-align: center;
+                }
+                
+                td:nth-child(2),
+                td:nth-child(3) {
+                    text-align: left;
+                }
+            `;
+            
+            const printWindow = window.open('', '_blank');
+            const printHTML = generatePrintTemplate('Teachers Management Report', teachersHTML, additionalStyles);
+            
+            printWindow.document.write(printHTML);
+            printWindow.document.close();
+        }
+        
+        function openAssignSubjectsModal(teacherId, teacherName) {
+            showLoader('Loading subjects...');
+            
+            // Fetch available subjects from database
+            fetch('?action=get_available_subjects&teacher_id=' + teacherId)
+                .then(response => response.json())
+                .then(data => {
+                    hideLoader();
+                    if (data.success) {
+                        showAssignSubjectsModal(teacherId, teacherName, data.subjects);
+                    } else {
+                        showErrorMessage(data.message || 'Failed to load subjects');
+                    }
+                })
+                .catch(error => {
+                    hideLoader();
+                    console.error('Error:', error);
+                    showErrorMessage('Failed to load subjects');
+                });
+        }
+        
+        function showAssignSubjectsModal(teacherId, teacherName, subjects) {
+            // Escape function
+            const escape = (str) => {
+                if (!str) return '';
+                const div = document.createElement('div');
+                div.textContent = str;
+                return div.innerHTML;
+            };
+            
+            const modalHTML = `
+                <div id="assignSubjectsModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                     background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+                    <div style="background: white; padding: 2rem; border-radius: 12px; max-width: 700px; width: 90%; max-height: 90vh; overflow-y: auto;">
+                        <h3 style="margin: 0 0 1.5rem 0; color: #1e3a8a;"><span data-translate="assign_subjects">Assign Subjects</span> - ${escape(teacherName)}</h3>
+                        <form id="assignSubjectsForm" onsubmit="submitAssignSubject(event, ${teacherId})">
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="subject">Subject</label>
+                                <select name="subject_id" id="assignSubjectSelect" class="premium-select" required style="width: 100%;" onchange="updateYearClassOptions()">
+                                    <option value="">Select Subject</option>
+                                    ${subjects.map(s => `<option value="${s.id}" data-year="${s.year}">${escape(s.subject_name)} (Year ${s.year})</option>`).join('')}
+                                </select>
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="year">Year</label>
+                                <select name="year" id="assignYearSelect" class="premium-select" required style="width: 100%;" disabled>
+                                    <option value="">Select subject first</option>
+                                </select>
+                            </div>
+                            <div style="margin-bottom: 1.5rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="class">Class</label>
+                                <select name="class_level" class="premium-select" required style="width: 100%;">
+                                    <option value="A">Class A</option>
+                                    <option value="B">Class B</option>
+                                    <option value="C">Class C</option>
+                                </select>
+                            </div>
+                            <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+                                <button type="button" onclick="closeAssignSubjectsModal()" class="export-btn" style="background: #6b7280;" data-translate="cancel">Cancel</button>
+                                <button type="submit" class="apply-filters-btn" data-translate="assign">Assign</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            `;
+            
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+        }
+        
+        function updateYearClassOptions() {
+            const subjectSelect = document.getElementById('assignSubjectSelect');
+            const yearSelect = document.getElementById('assignYearSelect');
+            
+            if (subjectSelect.value) {
+                const selectedOption = subjectSelect.options[subjectSelect.selectedIndex];
+                const year = selectedOption.getAttribute('data-year');
+                
+                yearSelect.innerHTML = `<option value="${year}" selected>Year ${year}</option>`;
+                yearSelect.disabled = false;
+            } else {
+                yearSelect.innerHTML = '<option value="">Select subject first</option>';
+                yearSelect.disabled = true;
+            }
+        }
+        
+        function closeAssignSubjectsModal() {
+            const modal = document.getElementById('assignSubjectsModal');
+            if (modal) modal.remove();
+        }
+        
+        function submitAssignSubject(event, teacherId) {
+            event.preventDefault();
+            showLoader('Assigning subject...');
+            
+            const form = event.target;
+            const formData = new FormData(form);
+            formData.append('action', 'assign_subject_to_teacher');
+            formData.append('teacher_id', teacherId);
+            
+            fetch('', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                hideLoader();
+                closeAssignSubjectsModal();
+                if (data.success) {
+                    showSuccessMessage(data.message);
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                } else {
+                    showErrorMessage(data.message);
+                }
+            })
+            .catch(error => {
+                hideLoader();
+                console.error('Error:', error);
+                showErrorMessage('Failed to assign subject');
+            });
+        }
+
 
     </script>
     
@@ -11454,6 +14182,77 @@ if ($page == 'reports') {
     @keyframes fadeOut {
         from { opacity: 1; }
         to { opacity: 0; }
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    
+    /* Print Styles */
+    @media print {
+        /* Hide everything except the table */
+        nav, .filter-panel, .export-actions, .action-btn, 
+        .language-selector, .dashboard-subtitle, .filter-sections,
+        .section-header .export-actions, button, .add-form-container {
+            display: none !important;
+        }
+        
+        /* Hide filter bar and add teacher form */
+        .filter-sections {
+            display: none !important;
+        }
+        
+        /* Show only section title */
+        .section-header {
+            margin-bottom: 1rem;
+        }
+        
+        .section-title {
+            font-size: 1.5rem;
+            color: #000;
+        }
+        
+        .content-wrapper {
+            padding: 0 !important;
+        }
+        
+        .data-table-section {
+            box-shadow: none !important;
+            border: none !important;
+        }
+        
+        table {
+            page-break-inside: auto;
+        }
+        
+        tr {
+            page-break-inside: avoid;
+            page-break-after: auto;
+        }
+        
+        thead {
+            display: table-header-group;
+        }
+        
+        /* Hide expandable details in print */
+        .teacher-details-row {
+            display: none !important;
+        }
+        
+        /* Clean table for printing */
+        th, td {
+            border: 1px solid #000 !important;
+            padding: 8px !important;
+        }
+        
+        /* Remove unnecessary styling for print */
+        span {
+            background: none !important;
+            color: #000 !important;
+            border: none !important;
+            padding: 0 !important;
+        }
     }
     </style>
     </script>
