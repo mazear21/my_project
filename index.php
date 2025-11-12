@@ -1,4 +1,9 @@
 ﻿<?php
+// Prevent caching to ensure fresh data
+header("Cache-Control: no-cache, no-store, must-revalidate");
+header("Pragma: no-cache");
+header("Expires: 0");
+
 // Authentication Check
 include 'auth_check.php';
 
@@ -7,6 +12,13 @@ ob_start();
 
 // Include database connection
 include 'db.php';
+
+// Add password_plain column if it doesn't exist (for admin to view passwords)
+$check_column = "SELECT column_name FROM information_schema.columns WHERE table_name='teachers' AND column_name='password_plain'";
+$column_exists = pg_query($conn, $check_column);
+if (pg_num_rows($column_exists) == 0) {
+    pg_query($conn, "ALTER TABLE teachers ADD COLUMN password_plain TEXT");
+}
 
 // Handle AJAX requests
 if (isset($_POST['action'])) {
@@ -84,6 +96,68 @@ if (isset($_POST['action'])) {
         } else {
             echo json_encode(['success' => false, 'message' => 'Database error: ' . pg_last_error($conn)]);
         }
+        exit;
+    }
+    
+    // TEACHER TASK MANAGEMENT
+    if ($_POST['action'] === 'add_task') {
+        if (!isTeacher()) {
+            echo json_encode(['success' => false, 'message' => 'Access Denied']);
+            exit;
+        }
+        
+        $teacher_id = $_SESSION['teacher_id'];
+        $subject_id = !empty($_POST['subject_id']) ? (int)$_POST['subject_id'] : null;
+        $task_type = $_POST['task_type'];
+        $title = $_POST['title'];
+        $description = $_POST['description'] ?? '';
+        $due_date = !empty($_POST['due_date']) ? $_POST['due_date'] : null;
+        $priority = $_POST['priority'] ?? 'medium';
+        
+        $query = "INSERT INTO teacher_tasks (teacher_id, subject_id, task_type, title, description, due_date, priority) 
+                  VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id";
+        $result = pg_query_params($conn, $query, [$teacher_id, $subject_id, $task_type, $title, $description, $due_date, $priority]);
+        
+        if ($result) {
+            $task_id = pg_fetch_result($result, 0, 0);
+            echo json_encode(['success' => true, 'task_id' => $task_id]);
+        } else {
+            echo json_encode(['success' => false, 'message' => pg_last_error($conn)]);
+        }
+        exit;
+    }
+    
+    if ($_POST['action'] === 'update_task_status') {
+        if (!isTeacher()) {
+            echo json_encode(['success' => false, 'message' => 'Access Denied']);
+            exit;
+        }
+        
+        $task_id = (int)$_POST['task_id'];
+        $status = $_POST['status'];
+        $teacher_id = $_SESSION['teacher_id'];
+        
+        $query = "UPDATE teacher_tasks SET status = $1, updated_at = CURRENT_TIMESTAMP 
+                  WHERE id = $2 AND teacher_id = $3";
+        $result = pg_query_params($conn, $query, [$status, $task_id, $teacher_id]);
+        
+        echo json_encode(['success' => (bool)$result]);
+        exit;
+    }
+    
+    if ($_POST['action'] === 'delete_task') {
+        if (!isTeacher()) {
+            echo json_encode(['success' => false, 'message' => 'Access Denied']);
+            exit;
+        }
+        
+        $task_id = (int)$_POST['task_id'];
+        $teacher_id = $_SESSION['teacher_id'];
+        
+        $query = "DELETE FROM teacher_tasks WHERE id = $1 AND teacher_id = $2";
+        $result = pg_query_params($conn, $query, [$task_id, $teacher_id]);
+        
+        echo json_encode(['success' => (bool)$result]);
         exit;
     }
     
@@ -528,15 +602,9 @@ if (isset($_POST['action']) && $_POST['action'] === 'generate_teacher_credential
     $username = trim($_POST['username']);
     $password = trim($_POST['password']);
     
-    if ($teacher_id > 0 && !empty($username) && !empty($password)) {
-        // Validate password length
-        if (strlen($password) < 6) {
-            echo json_encode(['success' => false, 'message' => 'Password must be at least 6 characters long.']);
-            exit;
-        }
-        
+    if ($teacher_id > 0 && !empty($username)) {
         // Get teacher details
-        $check_query = "SELECT id, name, username FROM teachers WHERE id = $1";
+        $check_query = "SELECT id, name, username, password FROM teachers WHERE id = $1";
         $check_result = pg_query_params($conn, $check_query, array($teacher_id));
         
         if (pg_num_rows($check_result) === 0) {
@@ -545,6 +613,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'generate_teacher_credential
         }
         
         $teacher_data = pg_fetch_assoc($check_result);
+        $has_existing_password = !empty($teacher_data['password']);
         
         // Check if username already exists for other teachers
         $check_username = "SELECT id FROM teachers WHERE username = $1 AND id != $2";
@@ -555,12 +624,29 @@ if (isset($_POST['action']) && $_POST['action'] === 'generate_teacher_credential
             exit;
         }
         
-        // Hash password
-        $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-        
-        // Update teacher with new credentials
-        $update_query = "UPDATE teachers SET username = $1, password = $2, role = 'teacher', is_active = true WHERE id = $3";
-        $update_result = pg_query_params($conn, $update_query, array($username, $hashed_password, $teacher_id));
+        // Validate password if provided or if creating new credentials
+        if (!empty($password)) {
+            // New password provided - validate and hash it
+            if (strlen($password) < 6) {
+                echo json_encode(['success' => false, 'message' => 'Password must be at least 6 characters long.']);
+                exit;
+            }
+            $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+            // Store encrypted password for admin viewing (base64 encoded)
+            $encrypted_password = base64_encode($password);
+            
+            // Update with new password and encrypted backup
+            $update_query = "UPDATE teachers SET username = $1, password = $2, password_plain = $3, role = 'teacher', is_active = true WHERE id = $4";
+            $update_result = pg_query_params($conn, $update_query, array($username, $hashed_password, $encrypted_password, $teacher_id));
+        } elseif ($has_existing_password) {
+            // No new password provided, but teacher has existing password - keep it
+            $update_query = "UPDATE teachers SET username = $1, role = 'teacher', is_active = true WHERE id = $2";
+            $update_result = pg_query_params($conn, $update_query, array($username, $teacher_id));
+        } else {
+            // No password provided and no existing password - error
+            echo json_encode(['success' => false, 'message' => 'Password is required for new credentials.']);
+            exit;
+        }
         
         if ($update_result) {
             // Log the action
@@ -568,9 +654,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'generate_teacher_credential
                       ['username' => $teacher_data['username']], 
                       ['username' => $username]);
             
+            $message = !empty($password) ? 'Credentials updated successfully!' : 'Username updated successfully!';
             echo json_encode([
                 'success' => true,
-                'message' => 'Credentials saved successfully!'
+                'message' => $message
             ]);
             exit;
         } else {
@@ -1665,11 +1752,11 @@ if (isset($_GET['error'])) {
 // Get page parameter
 $page = $_GET['page'] ?? 'reports';
 
-// TEACHER PERMISSIONS: Restrict teachers to marks page only
+// TEACHER PERMISSIONS: Allow teachers to access dashboard and marks
 if (isTeacher()) {
-    $allowed_pages = ['marks']; // Teachers can only access marks page
+    $allowed_pages = ['dashboard', 'marks']; // Teachers can access dashboard and marks
     if (!in_array($page, $allowed_pages)) {
-        $page = 'marks'; // Force redirect to marks page
+        $page = 'dashboard'; // Default to dashboard
     }
 }
 
@@ -1988,7 +2075,7 @@ function getStudentDistributionData($conn, $filter_type = 'overview') {
         
         $labels = [];
         $data = [];
-        $colors = ['#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899'];
+        $colors = ['#1e40af', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899'];
         
         if ($result && pg_num_rows($result) > 0) {
             $i = 0;
@@ -2024,7 +2111,7 @@ function getStudentDistributionData($conn, $filter_type = 'overview') {
         
         $labels = [];
         $data = [];
-        $colors = ['#10B981', '#F59E0B', '#8B5CF6', '#EF4444', '#3B82F6', '#EC4899'];
+        $colors = ['#10B981', '#F59E0B', '#8B5CF6', '#EF4444', '#1e40af', '#EC4899'];
         
         if ($result && pg_num_rows($result) > 0) {
             $i = 0;
@@ -2062,7 +2149,7 @@ function getStudentDistributionData($conn, $filter_type = 'overview') {
         return [
             'labels' => ['Year 1 Active', 'Year 2 Active', 'Graduated'],
             'data' => [$year1_count, $year2_count, $graduated_count],
-            'colors' => ['#3B82F6', '#10B981', '#F59E0B']
+            'colors' => ['#1e40af', '#10B981', '#F59E0B']
         ];
     }
 }
@@ -2497,6 +2584,7 @@ if ($page == 'reports') {
             min-height: 100vh;
             color: var(--text-color);
             line-height: 1.6;
+            overflow-x: hidden;
         }
 
         /* ===== NAVIGATION - MATCHING IMAGE STYLE ===== */
@@ -2510,14 +2598,14 @@ if ($page == 'reports') {
         }
 
         .nav-container {
-            max-width: 1400px;
-            margin: 0 auto;
-            display: flex;
+            max-width: 100%;
+            margin: 0;
+            display: grid;
+            grid-template-columns: auto 1fr auto;
             align-items: center;
-            justify-content: space-between;
-            padding: 0 1.5rem;
+            padding: 0 2rem;
             min-height: 70px;
-            gap: 3rem;
+            gap: 2rem;
         }
 
         .nav-links {
@@ -2528,22 +2616,29 @@ if ($page == 'reports') {
             border-radius: 15px;
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.2);
-            margin-left: auto;
-            margin-right: 1rem;
+            justify-self: center;
+            flex-wrap: nowrap;
+        }
+        
+        .user-info-section {
+            justify-self: end;
+            display: flex;
+            align-items: center;
+            gap: 15px;
         }
 
         .nav-container a {
             text-decoration: none;
             color: white;
             font-weight: 600;
-            padding: 12px 24px;
+            padding: 10px 18px;
             border-radius: 10px;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             position: relative;
-            font-size: 14px;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
+            font-size: 13px;
+            letter-spacing: 0.3px;
             border: 2px solid transparent;
+            white-space: nowrap;
         }
 
         .nav-container a::before {
@@ -2588,24 +2683,21 @@ if ($page == 'reports') {
             display: flex;
             gap: 0.5rem;
             align-items: center;
-            margin-left: 1.5rem;
         }
 
         .language-switcher select {
             background: linear-gradient(45deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.1));
             color: white;
             border: 2px solid rgba(255, 255, 255, 0.3);
-            padding: 11px 18px;
+            padding: 10px 16px;
             border-radius: 12px;
             font-family: 'Roboto', 'Noto Sans', sans-serif;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             backdrop-filter: blur(10px);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            min-width: 65px;
+            min-width: 60px;
         }
 
         .language-switcher select:hover {
@@ -2709,9 +2801,16 @@ if ($page == 'reports') {
 
         /* ===== CONTAINERS ===== */
         .container {
-            max-width: 1400px;
+            max-width: 100%;
+            width: 100%;
             margin: 0 auto;
             padding: 2rem;
+        }
+        
+        @media (min-width: 1440px) {
+            .container {
+                max-width: 1400px;
+            }
         }
 
         .content-wrapper {
@@ -2728,53 +2827,25 @@ if ($page == 'reports') {
         }
 
         .dashboard-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 2.5rem 2rem;
-            text-align: center;
-            position: relative;
-            overflow: hidden;
-            border-radius: 0;
+            padding: 3rem 2rem 2rem;
             margin: 0;
-        }
-
-        .dashboard-header::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="grain" width="100" height="100" patternUnits="userSpaceOnUse"><circle cx="50" cy="50" r="1" fill="rgba(255,255,255,0.1)"/></pattern></defs><rect width="100" height="100" fill="url(%23grain)"/></svg>');
-            opacity: 0.3;
+            border-bottom: none;
+            background: var(--primary-color);
+            text-align: center;
         }
 
         .dashboard-header h1 {
-            font-size: 2.5rem;
-            font-weight: 700;
+            font-size: 2rem;
+            font-weight: 600;
+            color: #ffffff;
             margin-bottom: 0.5rem;
-            position: relative;
-            z-index: 2;
-            min-height: 3rem;
-            line-height: 1.2;
+            letter-spacing: -0.5px;
         }
 
         .dashboard-subtitle {
-            font-size: 1.1rem;
-            opacity: 0.9;
-            font-weight: 300;
-            position: relative;
-            z-index: 2;
-            min-height: 1.4rem;
-            line-height: 1.3;
-        }
-        
-        /* Blur text animation segments */
-        .blur-text-segment {
-            display: inline-block;
-            will-change: transform, filter, opacity;
-            backface-visibility: hidden;
-            -webkit-font-smoothing: antialiased;
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.9);
+            font-weight: 400;
             text-rendering: optimizeLegibility;
         }
         
@@ -2787,6 +2858,11 @@ if ($page == 'reports') {
         /* ===== REPORTS MAIN CONTENT ===== */
         .reports-main-content {
             padding: 2rem;
+            padding-top: 2rem;
+            width: 100%;
+            max-width: 100%;
+            overflow-y: auto;
+            min-height: calc(100vh - 70px);
         }
 
         /* ===== YEAR FILTER TOGGLE ===== */
@@ -2862,74 +2938,235 @@ if ($page == 'reports') {
         /* ===== KPI CARDS ===== */
         .kpi-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            grid-template-columns: repeat(4, 1fr);
             gap: 1.5rem;
             margin-bottom: 3rem;
+            width: 100%;
+            scroll-margin-top: 90px;
+        }
+        
+        @media (max-width: 1400px) {
+            .kpi-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+        
+        @media (max-width: 1024px) {
+            .kpi-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @media (max-width: 640px) {
+            .kpi-grid {
+                grid-template-columns: 1fr;
+            }
         }
 
         .kpi-card {
-            background: var(--card-bg);
-            border-radius: var(--border-radius);
+            position: relative;
+            border-radius: 14px;
             padding: 1.5rem;
-            box-shadow: var(--shadow);
-            border: 1px solid var(--border-color);
-            transition: var(--transition);
+            z-index: 1;
+            overflow: hidden;
             display: flex;
             align-items: center;
             justify-content: center;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .kpi-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 4px;
-            height: 100%;
-            background: linear-gradient(45deg, var(--primary-color), var(--success-color));
+            box-shadow: 20px 20px 60px #bebebe, -20px -20px 60px #ffffff;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
         .kpi-card:hover {
-            transform: translateY(-5px);
-            box-shadow: var(--shadow-hover);
+            transform: translateY(-8px) scale(1.02);
+            box-shadow: 25px 25px 70px #bebebe, -25px -25px 70px #ffffff;
+        }
+
+        /* Animated Blob Background */
+        .bg {
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            right: 5px;
+            bottom: 5px;
+            z-index: 2;
+            background: rgba(255, 255, 255, .95);
+            backdrop-filter: blur(24px);
+            border-radius: 10px;
+            overflow: hidden;
+            outline: 2px solid white;
+        }
+
+        .blob {
+            position: absolute;
+            z-index: 1;
+            top: 50%;
+            left: 50%;
+            width: 150px;
+            height: 150px;
+            border-radius: 50%;
+            opacity: 1;
+            filter: blur(12px);
+        }
+
+        /* Different animations for each blob - clockwise from top-left */
+        @keyframes blob-bounce-1 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(0, 0, 0); }
+            25% { transform: translate(-100%, -100%) translate3d(100%, 0, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(100%, 100%, 0); }
+            75% { transform: translate(-100%, -100%) translate3d(0, 100%, 0); }
+        }
+
+        /* Counter-clockwise from top-right */
+        @keyframes blob-bounce-2 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(100%, 0, 0); }
+            25% { transform: translate(-100%, -100%) translate3d(100%, 100%, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(0, 100%, 0); }
+            75% { transform: translate(-100%, -100%) translate3d(0, 0, 0); }
+        }
+
+        /* Diagonal bounce - top-left to bottom-right */
+        @keyframes blob-bounce-3 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(0, 0, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(100%, 100%, 0); }
+        }
+
+        /* Diagonal bounce - top-right to bottom-left */
+        @keyframes blob-bounce-4 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(100%, 0, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(0, 100%, 0); }
+        }
+
+        /* Horizontal slide */
+        @keyframes blob-bounce-5 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(0, 50%, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(100%, 50%, 0); }
+        }
+
+        /* Vertical slide */
+        @keyframes blob-bounce-6 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(50%, 0, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(50%, 100%, 0); }
+        }
+
+        /* Figure-8 pattern */
+        @keyframes blob-bounce-7 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(0, 50%, 0); }
+            25% { transform: translate(-100%, -100%) translate3d(50%, 0, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(100%, 50%, 0); }
+            75% { transform: translate(-100%, -100%) translate3d(50%, 100%, 0); }
+        }
+
+        /* Reverse clockwise */
+        @keyframes blob-bounce-8 {
+            0%, 100% { transform: translate(-100%, -100%) translate3d(0, 100%, 0); }
+            25% { transform: translate(-100%, -100%) translate3d(0, 0, 0); }
+            50% { transform: translate(-100%, -100%) translate3d(100%, 0, 0); }
+            75% { transform: translate(-100%, -100%) translate3d(100%, 100%, 0); }
+        }
+
+        /* Blob colors and animations for different KPI cards */
+        .kpi-card:nth-child(1) .blob {
+            background-color: #1e40af;
+            animation: blob-bounce-1 6s infinite ease-in-out;
+        }
+
+        .kpi-card:nth-child(2) .blob {
+            background-color: #10b981;
+            animation: blob-bounce-2 7s infinite ease-in-out;
+        }
+
+        .kpi-card:nth-child(3) .blob {
+            background-color: #f59e0b;
+            animation: blob-bounce-3 5s infinite ease-in-out;
+        }
+
+        .kpi-card:nth-child(4) .blob {
+            background-color: #8b5cf6;
+            animation: blob-bounce-4 5.5s infinite ease-in-out;
+        }
+
+        .kpi-card:nth-child(5) .blob {
+            background-color: #1e40af;
+            animation: blob-bounce-5 6.5s infinite ease-in-out;
+        }
+
+        .kpi-card:nth-child(6) .blob {
+            background-color: #ef4444;
+            animation: blob-bounce-6 5s infinite ease-in-out;
+        }
+
+        .kpi-card:nth-child(7) .blob {
+            background-color: #10b981;
+            animation: blob-bounce-7 8s infinite ease-in-out;
+        }
+
+        .kpi-card:nth-child(8) .blob {
+            background-color: #f59e0b;
+            animation: blob-bounce-8 7s infinite ease-in-out;
         }
 
         .kpi-icon {
-            width: 60px;
-            height: 60px;
-            border-radius: 12px;
+            width: 70px;
+            height: 70px;
+            border-radius: 16px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.5rem;
+            font-size: 1.8rem;
             color: white;
             font-weight: 600;
+            position: relative;
+            z-index: 2;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+            transition: all 0.3s ease;
         }
 
-        .students-icon { background: var(--kpi-blue); }
-        .subjects-icon { background: var(--kpi-light-blue); }
-        .score-icon { background: var(--kpi-yellow); }
-        .class-icon { background: var(--kpi-cyan); }
+        .kpi-card:hover .kpi-icon {
+            transform: scale(1.1) rotate(5deg);
+            box-shadow: 0 12px 28px rgba(0,0,0,0.25);
+        }
+
+        .kpi-card:nth-child(1) .kpi-icon { 
+            background: linear-gradient(135deg, #3b82f6, #1e40af); 
+        }
+        .kpi-card:nth-child(2) .kpi-icon { 
+            background: linear-gradient(135deg, #10b981, #059669); 
+        }
+        .kpi-card:nth-child(3) .kpi-icon { 
+            background: linear-gradient(135deg, #f59e0b, #d97706); 
+        }
+        .kpi-card:nth-child(4) .kpi-icon { 
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed); 
+        }
 
         .kpi-content {
             text-align: center;
             width: 100%;
+            position: relative;
+            z-index: 10;
+        }
+        
+        .kpi-card > .kpi-icon,
+        .kpi-card > .kpi-content {
+            position: relative;
+            z-index: 10;
         }
 
         .kpi-value {
-            font-size: 2rem;
+            font-size: 2.2rem;
             font-weight: 700;
-            color: var(--text-color);
+            color: #1e293b;
             line-height: 1;
-            margin-bottom: 0.25rem;
+            margin-bottom: 0.4rem;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
 
         .kpi-label {
-            font-size: 0.9rem;
-            color: var(--text-light);
-            font-weight: 500;
+            font-size: 0.95rem;
+            color: #64748b;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
         .kpi-trend {
@@ -2949,7 +3186,7 @@ if ($page == 'reports') {
             padding: 1.5rem;
             box-shadow: var(--shadow);
             border: 1px solid var(--border-color);
-            margin-bottom: 2rem;
+            margin-bottom: 1.5rem;
         }
 
         .filter-title {
@@ -3033,9 +3270,11 @@ if ($page == 'reports') {
         /* ===== CHARTS GRID ===== */
         .charts-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 2rem;
-            margin-bottom: 3rem;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+            width: 100%;
+            max-width: 100%;
         }
 
         .chart-card {
@@ -3045,6 +3284,8 @@ if ($page == 'reports') {
             box-shadow: var(--shadow);
             border: 1px solid var(--border-color);
             transition: var(--transition);
+            max-width: 100%;
+            min-width: 0;
         }
 
         .chart-card:hover {
@@ -3140,6 +3381,8 @@ if ($page == 'reports') {
         .chart-container {
             height: 300px;
             position: relative;
+            max-width: 100%;
+            width: 100%;
         }
 
         .chart-loading {
@@ -3988,14 +4231,18 @@ if ($page == 'reports') {
         }
 
         /* ===== RESPONSIVE DESIGN ===== */
+        @media (max-width: 1200px) {
+            .charts-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        
         @media (max-width: 768px) {
             .container { padding: 1rem; }
             .nav-container { padding: 0 1rem; flex-wrap: wrap; }
             .user-info-section { flex-wrap: wrap; width: 100%; justify-content: center !important; margin-top: 10px; }
             .current-user { font-size: 12px !important; }
             .reports-main-content { padding: 1rem; }
-            .dashboard-header { padding: 1.5rem 1rem; }
-            .dashboard-header h1 { font-size: 1.8rem; }
+            .dashboard-header { padding: 2rem 1rem 1.5rem; text-align: center; }
+            .dashboard-header h1 { font-size: 1.5rem; }
             .charts-grid { grid-template-columns: 1fr; gap: 1rem; }
             .kpi-grid { grid-template-columns: 1fr; gap: 1rem; }
             .chart-card { padding: 1rem; margin: 0; }
@@ -4017,7 +4264,7 @@ if ($page == 'reports') {
     <nav>
         <div class="nav-container">
             <div class="nav-brand">
-                <div class="brand-icon">🎓</div>
+                <div class="brand-icon"><i class="fas fa-graduation-cap"></i></div>
                 <div class="brand-text">
                     <span class="brand-title" data-translate="system_title">Student Management</span>
                     <span class="brand-subtitle" data-translate="system_subtitle">Academic Portal</span>
@@ -4030,29 +4277,28 @@ if ($page == 'reports') {
                     <a href="?page=marks" <?= $page == 'marks' ? 'class="active"' : '' ?> data-translate="nav_marks">Marks</a>
                     <a href="?page=subjects" <?= $page == 'subjects' ? 'class="active"' : '' ?> data-translate="nav_subjects">Subjects</a>
                     <a href="?page=teachers" <?= $page == 'teachers' ? 'class="active"' : '' ?> data-translate="nav_teachers">Teachers</a>
-                    <a href="?page=teacher_dashboard" <?= $page == 'teacher_dashboard' ? 'class="active"' : '' ?>>Teacher Access</a>
+                    <a href="?page=teacher_dashboard" <?= $page == 'teacher_dashboard' ? 'class="active"' : '' ?> data-translate="nav_access">Access</a>
                     <a href="?page=graduated" <?= $page == 'graduated' ? 'class="active"' : '' ?> data-translate="nav_graduated">Graduates</a>
                 <?php else: ?>
-                    <a href="teacher_dashboard.php" data-translate="nav_dashboard">My Dashboard</a>
-                    <a href="?page=marks" class="active" data-translate="nav_marks">My Students' Marks</a>
+                    <a href="?page=dashboard" <?= $page == 'dashboard' ? 'class="active"' : '' ?> data-translate="nav_dashboard">Dashboard</a>
+                    <a href="?page=marks" <?= $page == 'marks' ? 'class="active"' : '' ?> data-translate="nav_marks">Marks</a>
                 <?php endif; ?>
             </div>
-            <div class="user-info-section" style="display: flex; align-items: center; gap: 20px;">
-                <div class="current-user" style="display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: rgba(255,255,255,0.1); border-radius: 8px;">
-                    <span style="font-size: 20px;"><?= isAdmin() ? '👨‍💼' : '👨‍🏫' ?></span>
+            <div class="user-info-section">
+                <div class="current-user" style="display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: rgba(255,255,255,0.1); border-radius: 8px;">
                     <div style="display: flex; flex-direction: column; align-items: flex-start;">
-                        <span style="font-size: 12px; opacity: 0.8;"><?= isAdmin() ? 'Administrator' : 'Teacher' ?></span>
-                        <span style="font-weight: 600; font-size: 14px;"><?= htmlspecialchars($_SESSION['full_name']) ?></span>
+                        <span style="font-size: 11px; opacity: 0.8;"><?= isAdmin() ? 'Administrator' : 'Teacher' ?></span>
+                        <span style="font-weight: 600; font-size: 13px;"><?= htmlspecialchars($_SESSION['full_name']) ?></span>
                     </div>
                 </div>
-                <a href="logout.php" style="padding: 8px 16px; background: rgba(255,255,255,0.2); border-radius: 8px; text-decoration: none; color: white; font-weight: 500; transition: all 0.3s; border: 1px solid rgba(255,255,255,0.3);" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
-                    🚪 Logout
+                <a href="logout.php" style="padding: 8px 14px; background: rgba(255,255,255,0.2); border-radius: 8px; text-decoration: none; color: white; font-weight: 500; font-size: 13px; transition: all 0.3s; border: 1px solid rgba(255,255,255,0.3);" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                    Logout
                 </a>
                 <div class="language-switcher">
                     <select id="languageSelector" onchange="changeLanguage(this.value)">
-                        <option value="en">En</option>
-                        <option value="ar">Ar</option>
-                        <option value="ku">Kr</option>
+                        <option value="en">EN</option>
+                        <option value="ar">AR</option>
+                        <option value="ku">KU</option>
                     </select>
                 </div>
             </div>
@@ -4076,13 +4322,372 @@ if ($page == 'reports') {
     <?php endif; ?>
 
     <div class="container">
-        <?php if ($page == 'reports'): ?>
-            <!-- PREMIUM REPORTS DASHBOARD -->
+        <?php if ($page == 'dashboard' && isTeacher()): ?>
+            <!-- PROFESSIONAL TEACHER DASHBOARD -->
+            <?php
+            $teacher_id = $_SESSION['teacher_id'];
+            
+            // Get teacher info and subjects
+            $teacher_info = pg_query_params($conn, "SELECT * FROM teachers WHERE id = $1", [$teacher_id]);
+            $teacher = pg_fetch_assoc($teacher_info);
+            
+            $teacher_subjects = pg_query_params($conn, "
+                SELECT s.id, s.subject_name, s.year 
+                FROM subjects s
+                INNER JOIN teacher_subjects ts ON s.id = ts.subject_id
+                WHERE ts.teacher_id = $1
+                ORDER BY s.year, s.subject_name
+            ", [$teacher_id]);
+            
+            // Get teacher tasks
+            $tasks_query = "
+                SELECT t.*, s.subject_name, s.year as subject_year
+                FROM teacher_tasks t
+                LEFT JOIN subjects s ON t.subject_id = s.id
+                WHERE t.teacher_id = $1 AND t.status != 'cancelled'
+                ORDER BY 
+                    CASE WHEN t.due_date IS NULL THEN 1 ELSE 0 END,
+                    t.due_date ASC,
+                    CASE t.priority 
+                        WHEN 'high' THEN 1 
+                        WHEN 'medium' THEN 2 
+                        WHEN 'low' THEN 3 
+                    END
+            ";
+            $tasks_result = pg_query_params($conn, $tasks_query, [$teacher_id]);
+            
+            // Get student count for this teacher
+            $student_count = pg_query_params($conn, "
+                SELECT COUNT(DISTINCT m.student_id) as count
+                FROM marks m
+                INNER JOIN teacher_subjects ts ON m.subject_id = ts.subject_id
+                WHERE ts.teacher_id = $1
+            ", [$teacher_id]);
+            $total_students = pg_fetch_result($student_count, 0, 0);
+            
+            // Get upcoming tasks count
+            $upcoming_tasks = pg_query_params($conn, "
+                SELECT COUNT(*) as count
+                FROM teacher_tasks
+                WHERE teacher_id = $1 
+                AND status = 'pending' 
+                AND due_date >= CURRENT_DATE
+            ", [$teacher_id]);
+            $upcoming_count = pg_fetch_result($upcoming_tasks, 0, 0);
+            
+            // Get overdue tasks count
+            $overdue_tasks = pg_query_params($conn, "
+                SELECT COUNT(*) as count
+                FROM teacher_tasks
+                WHERE teacher_id = $1 
+                AND status = 'pending' 
+                AND due_date < CURRENT_DATE
+            ", [$teacher_id]);
+            $overdue_count = pg_fetch_result($overdue_tasks, 0, 0);
+            ?>
+            
             <div class="content-wrapper">
+                <div class="dashboard-header">
+                    <h1 data-translate="academic_task_manager">Academic Task Manager</h1>
+                    <p class="dashboard-subtitle"><span data-translate="welcome">Welcome</span>, <?= htmlspecialchars($teacher['name']) ?> - <span data-translate="manage_teaching_schedule">Manage your teaching schedule and academic tasks</span></p>
+                </div>
+
+                <div class="reports-main-content">
+                    <!-- Quick Stats -->
+                    <div class="kpi-grid">
+                        <div class="kpi-card">
+                            <div class="blob"></div>
+                            <div class="bg"></div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= pg_num_rows($teacher_subjects) ?></div>
+                                <div class="kpi-label" data-translate="subjects_teaching">Subjects Teaching</div>
+                            </div>
+                        </div>
+                        
+                        <div class="kpi-card">
+                            <div class="blob"></div>
+                            <div class="bg"></div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= $total_students ?></div>
+                                <div class="kpi-label" data-translate="kpi_total_students">Total Students</div>
+                            </div>
+                        </div>
+                        
+                        <div class="kpi-card">
+                            <div class="blob"></div>
+                            <div class="bg"></div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= $upcoming_count ?></div>
+                                <div class="kpi-label" data-translate="upcoming_tasks">Upcoming Tasks</div>
+                            </div>
+                        </div>
+                        
+                        <div class="kpi-card">
+                            <div class="blob"></div>
+                            <div class="bg"></div>
+                            <div class="kpi-content">
+                                <div class="kpi-value"><?= $overdue_count ?></div>
+                                <div class="kpi-label" data-translate="overdue_tasks">Overdue Tasks</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Main Content Grid -->
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 30px;">
+                        <!-- Add New Task Section -->
+                        <div class="chart-card">
+                            <h3 class="chart-title" style="display: flex; align-items: center; gap: 10px;">
+                                <i class="fas fa-plus-circle" style="color: var(--primary-color);"></i>
+                                <span data-translate="create_new_task">Create New Task</span>
+                            </h3>
+                            <form id="taskForm" style="padding: 20px;">
+                                <div style="margin-bottom: 15px;">
+                                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #334155;" data-translate="task_type">Task Type</label>
+                                    <select name="task_type" required style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
+                                        <option value="exam" data-translate="task_examination">Examination</option>
+                                        <option value="homework" data-translate="task_homework">Homework Assignment</option>
+                                        <option value="reminder" data-translate="task_reminder">Reminder</option>
+                                        <option value="note" data-translate="task_note">General Note</option>
+                                    </select>
+                                </div>
+                                
+                                <div style="margin-bottom: 15px;">
+                                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #334155;" data-translate="subject">Subject</label>
+                                    <select name="subject_id" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
+                                        <option value="" data-translate="all_subjects">All Subjects</option>
+                                        <?php while ($subject = pg_fetch_assoc($teacher_subjects)): ?>
+                                            <option value="<?= $subject['id'] ?>"><?= htmlspecialchars($subject['subject_name']) ?> (<span data-translate="year">Year</span> <?= $subject['year'] ?>)</option>
+                                        <?php endwhile; ?>
+                                    </select>
+                                </div>
+                                
+                                <div style="margin-bottom: 15px;">
+                                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #334155;" data-translate="task_title">Title <span style="color: #ef4444;">*</span></label>
+                                    <input type="text" name="title" required data-translate-placeholder="task_title_placeholder" placeholder="e.g., Midterm Exam - Chapter 1-3" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
+                                </div>
+                                
+                                <div style="margin-bottom: 15px;">
+                                    <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #334155;" data-translate="task_description">Description</label>
+                                    <textarea name="description" rows="3" data-translate-placeholder="task_description_placeholder" placeholder="Additional details..." style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px; resize: vertical;"></textarea>
+                                </div>
+                                
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                                    <div>
+                                        <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #334155;" data-translate="task_due_date">Due Date</label>
+                                        <input type="date" name="due_date" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
+                                    </div>
+                                    <div>
+                                        <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #334155;" data-translate="task_priority">Priority</label>
+                                        <select name="priority" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
+                                            <option value="low" data-translate="priority_low">Low</option>
+                                            <option value="medium" selected data-translate="priority_medium">Medium</option>
+                                            <option value="high" data-translate="priority_high">High</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                
+                                <button type="submit" style="width: 100%; padding: 12px; background: var(--primary-color); color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer;">
+                                    <i class="fas fa-save"></i> <span data-translate="create_task_btn">Create Task</span>
+                                </button>
+                            </form>
+                        </div>
+
+                        <!-- My Subjects Section -->
+                        <div class="chart-card">
+                            <h3 class="chart-title" style="display: flex; align-items: center; gap: 10px;">
+                                <i class="fas fa-book" style="color: var(--primary-color);"></i>
+                                <span data-translate="my_subjects">My Subjects</span>
+                            </h3>
+                            <div style="padding: 20px;">
+                                <?php 
+                                pg_result_seek($teacher_subjects, 0); // Reset pointer
+                                if (pg_num_rows($teacher_subjects) > 0):
+                                    while ($subj = pg_fetch_assoc($teacher_subjects)):
+                                        $student_count_subj = pg_query_params($conn, "
+                                            SELECT COUNT(DISTINCT student_id) as count
+                                            FROM marks
+                                            WHERE subject_id = $1
+                                        ", [$subj['id']]);
+                                        $subj_students = pg_fetch_result($student_count_subj, 0, 0);
+                                ?>
+                                    <div style="background: #f8fafc; border-left: 4px solid var(--primary-color); padding: 15px; margin-bottom: 12px; border-radius: 6px;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                                            <div>
+                                                <h4 style="margin: 0 0 5px 0; color: #1e293b; font-size: 15px;"><?= htmlspecialchars($subj['subject_name']) ?></h4>
+                                                <p style="margin: 0; color: #64748b; font-size: 13px;">
+                                                    <i class="fas fa-graduation-cap"></i> <span data-translate="year">Year</span> <?= $subj['year'] ?> | 
+                                                    <i class="fas fa-users"></i> <?= $subj_students ?> <span data-translate="students_label">Students</span>
+                                                </p>
+                                            </div>
+                                            <a href="?page=marks&subject=<?= $subj['id'] ?>" style="padding: 8px 16px; background: var(--primary-color); color: white; text-decoration: none; border-radius: 5px; font-size: 13px; font-weight: 600;">
+                                                <span data-translate="view_marks">View Marks</span>
+                                            </a>
+                                        </div>
+                                    </div>
+                                <?php 
+                                    endwhile;
+                                else:
+                                ?>
+                                    <p style="text-align: center; color: #94a3b8; padding: 40px;" data-translate="no_subjects_assigned">No subjects assigned yet</p>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tasks List -->
+                    <div class="chart-card" style="margin-top: 30px;">
+                        <h3 class="chart-title" style="display: flex; align-items: center; gap: 10px;">
+                            <i class="fas fa-tasks" style="color: var(--primary-color);"></i>
+                            My Tasks & Schedule
+                        </h3>
+                        <div id="tasksList" style="padding: 20px;">
+                            <?php if (pg_num_rows($tasks_result) > 0): ?>
+                                <div style="display: grid; gap: 12px;">
+                                    <?php while ($task = pg_fetch_assoc($tasks_result)): 
+                                        $is_overdue = $task['due_date'] && $task['due_date'] < date('Y-m-d') && $task['status'] == 'pending';
+                                        $priority_colors = [
+                                            'high' => '#ef4444',
+                                            'medium' => '#f59e0b',
+                                            'low' => '#3b82f6'
+                                        ];
+                                        $type_icons = [
+                                            'exam' => 'fa-file-alt',
+                                            'homework' => 'fa-book-open',
+                                            'reminder' => 'fa-bell',
+                                            'note' => 'fa-sticky-note'
+                                        ];
+                                    ?>
+                                        <div class="task-item" data-task-id="<?= $task['id'] ?>" style="background: <?= $task['status'] == 'completed' ? '#f0fdf4' : ($is_overdue ? '#fef2f2' : 'white') ?>; border: 1px solid <?= $task['status'] == 'completed' ? '#86efac' : ($is_overdue ? '#fecaca' : '#e2e8f0') ?>; border-left: 4px solid <?= $priority_colors[$task['priority']] ?>; padding: 16px; border-radius: 8px;">
+                                            <div style="display: flex; justify-content: space-between; align-items: start;">
+                                                <div style="flex: 1;">
+                                                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+                                                        <i class="fas <?= $type_icons[$task['task_type']] ?>" style="color: <?= $priority_colors[$task['priority']] ?>; font-size: 18px;"></i>
+                                                        <h4 style="margin: 0; color: #1e293b; font-size: 16px; <?= $task['status'] == 'completed' ? 'text-decoration: line-through; opacity: 0.7;' : '' ?>">
+                                                            <?= htmlspecialchars($task['title']) ?>
+                                                        </h4>
+                                                        <span style="background: <?= $priority_colors[$task['priority']] ?>; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase;">
+                                                            <?= $task['priority'] ?>
+                                                        </span>
+                                                    </div>
+                                                    
+                                                    <?php if ($task['description']): ?>
+                                                        <p style="margin: 8px 0; color: #64748b; font-size: 14px;"><?= htmlspecialchars($task['description']) ?></p>
+                                                    <?php endif; ?>
+                                                    
+                                                    <div style="display: flex; gap: 15px; margin-top: 8px; font-size: 13px; color: #64748b;">
+                                                        <span><i class="fas fa-tag"></i> <?= ucfirst($task['task_type']) ?></span>
+                                                        <?php if ($task['subject_name']): ?>
+                                                            <span><i class="fas fa-book"></i> <?= htmlspecialchars($task['subject_name']) ?></span>
+                                                        <?php endif; ?>
+                                                        <?php if ($task['due_date']): ?>
+                                                            <span style="<?= $is_overdue ? 'color: #ef4444; font-weight: 600;' : '' ?>">
+                                                                <i class="fas fa-calendar"></i> <?= date('M d, Y', strtotime($task['due_date'])) ?>
+                                                                <?= $is_overdue ? '(OVERDUE)' : '' ?>
+                                                            </span>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div style="display: flex; gap: 8px;">
+                                                    <?php if ($task['status'] == 'pending'): ?>
+                                                        <button onclick="updateTaskStatus(<?= $task['id'] ?>, 'completed')" style="padding: 8px 12px; background: #10b981; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 13px;">
+                                                            <i class="fas fa-check"></i> Complete
+                                                        </button>
+                                                    <?php else: ?>
+                                                        <button onclick="updateTaskStatus(<?= $task['id'] ?>, 'pending')" style="padding: 8px 12px; background: #64748b; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 13px;">
+                                                            <i class="fas fa-undo"></i> Reopen
+                                                        </button>
+                                                    <?php endif; ?>
+                                                    <button onclick="deleteTask(<?= $task['id'] ?>)" style="padding: 8px 12px; background: #ef4444; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 13px;">
+                                                        <i class="fas fa-trash"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    <?php endwhile; ?>
+                                </div>
+                            <?php else: ?>
+                                <p style="text-align: center; color: #94a3b8; padding: 40px;">
+                                    <i class="fas fa-inbox" style="font-size: 48px; display: block; margin-bottom: 15px; opacity: 0.5;"></i>
+                                    No tasks yet. Create your first task above to get started.
+                                </p>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <script>
+            // Task Management Functions
+            document.getElementById('taskForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                const formData = new FormData(this);
+                formData.append('action', 'add_task');
+                
+                fetch('index.php', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Task created successfully!');
+                        location.reload();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                });
+            });
+            
+            function updateTaskStatus(taskId, status) {
+                const formData = new FormData();
+                formData.append('action', 'update_task_status');
+                formData.append('task_id', taskId);
+                formData.append('status', status);
+                
+                fetch('index.php', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        alert('Error updating task');
+                    }
+                });
+            }
+            
+            function deleteTask(taskId) {
+                if (!confirm('Are you sure you want to delete this task?')) return;
+                
+                const formData = new FormData();
+                formData.append('action', 'delete_task');
+                formData.append('task_id', taskId);
+                
+                fetch('index.php', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        alert('Error deleting task');
+                    }
+                });
+            }
+            </script>
+
+        <?php elseif ($page == 'reports'): ?>
+            <!-- PREMIUM REPORTS DASHBOARD -->
+            <div class="content-wrapper page-dashboard">
                 <div class="reports-dashboard">
                     <!-- Dashboard Header -->
-                    <div class="dashboard-header" data-aos="fade-down">
-                        <h1 data-translate="analytics_dashboard">📊 Analytics Dashboard</h1>
+                    <div class="dashboard-header">
+                        <h1 data-translate="analytics_dashboard">Analytics Dashboard</h1>
                         <p class="dashboard-subtitle" data-translate="comprehensive_overview">Comprehensive Student Performance Overview</p>
                     </div>
 
@@ -4178,6 +4783,42 @@ if ($page == 'reports') {
                                 </div>
                             </div>
                         </div>
+
+                        <script>
+                        // Add animated waves to all KPI cards on Reports page
+                        (function() {
+                            // Wait for page to fully load
+                            if (document.readyState === 'loading') {
+                                document.addEventListener('DOMContentLoaded', addWaves);
+                            } else {
+                                addWaves();
+                            }
+                            
+                            function addWaves() {
+                                const kpiCards = document.querySelectorAll('.reports-main-content .kpi-grid .kpi-card');
+                                console.log('Found KPI cards:', kpiCards.length);
+                                
+                                kpiCards.forEach((card, index) => {
+                                    // Check if blob already exists
+                                    if (card.querySelector('.blob')) {
+                                        console.log('Blob already exists in card', index);
+                                        return;
+                                    }
+                                    
+                                    // Add blob and bg elements
+                                    const blob = document.createElement('div');
+                                    blob.className = 'blob';
+                                    card.insertBefore(blob, card.firstChild);
+                                    
+                                    const bg = document.createElement('div');
+                                    bg.className = 'bg';
+                                    card.insertBefore(bg, card.firstChild.nextSibling);
+                                    
+                                    console.log('Added blob animation to card', index);
+                                });
+                            }
+                        })();
+                        </script>
 
                         <!-- Charts Section -->
                         <div class="charts-grid">
@@ -4705,18 +5346,18 @@ if ($page == 'reports') {
                                     </select>
                                 </div>
                                 <div class="filter-section">
-                                    <label class="filter-label">Filter by Subject</label>
+                                    <label class="filter-label" data-translate="filter_by_subject">Filter by Subject</label>
                                     <select id="reportsFilterSubject" class="premium-select" onchange="filterReportsTable()">
-                                        <option value="">All Subjects</option>
+                                        <option value="" data-translate="all_subjects">All Subjects</option>
                                         <!-- Options will be populated dynamically -->
                                     </select>
                                 </div>
                                 <div class="filter-section">
-                                    <label class="filter-label">Sort by Final Grade</label>
+                                    <label class="filter-label" data-translate="sort_by_final_grade">Sort by Final Grade</label>
                                     <select id="sortReportsByGrade" class="premium-select" onchange="filterReportsTable()">
-                                        <option value="">Default</option>
-                                        <option value="asc">Grade: Low to High</option>
-                                        <option value="desc">Grade: High to Low</option>
+                                        <option value="" data-translate="sort_default">Default</option>
+                                        <option value="asc" data-translate="sort_grade_low_high">Grade: Low to High</option>
+                                        <option value="desc" data-translate="sort_grade_high_low">Grade: High to Low</option>
                                     </select>
                                 </div>
                                 <button class="clear-filters-btn" onclick="clearReportsFilters()" data-translate="clear_filters">
@@ -4823,7 +5464,7 @@ if ($page == 'reports') {
                                                 }
                                         ?>
                                         <!-- Student Main Row (Clickable) -->
-                                        <tr class="student-main-row" onclick="toggleStudentDetails(<?= $student_id ?>)" data-student-id="<?= $student_id ?>">
+                                        <tr class="student-main-row" onclick="toggleStudentDetails(<?= $student_id ?>)" data-student-id="<?= $student_id ?>" data-year="<?= $student['student_year'] ?>">
                                             <td>
                                                 <div class="student-name-cell">
                                                     <span class="expand-icon">▶</span>
@@ -4943,9 +5584,9 @@ if ($page == 'reports') {
 
         <?php elseif ($page == 'students'): ?>
             <!-- STUDENTS PAGE -->
-            <div class="content-wrapper">
+            <div class="content-wrapper page-students">
                 <div class="dashboard-header">
-                    <h1 data-translate="students_title"> Students Management</h1>
+                    <h1 data-translate="students_title">Students Management</h1>
                     <p class="dashboard-subtitle" data-translate="manage_student_info">Manage student information and enrollment</p>
                 </div>
                 <div class="reports-main-content">
@@ -5266,7 +5907,7 @@ if ($page == 'reports') {
 
         <?php elseif ($page == 'teacher_dashboard'): ?>
             <!-- TEACHER ACCESS MANAGEMENT PAGE -->
-            <div class="content-wrapper">
+            <div class="content-wrapper page-access">
                 <div class="dashboard-header">
                     <h1 data-translate="teacher_access_title">Teacher Access Management</h1>
                     <p class="dashboard-subtitle" data-translate="teacher_access_subtitle">Manage teacher login credentials and system access</p>
@@ -5276,24 +5917,67 @@ if ($page == 'reports') {
                     <!-- Statistics Cards -->
                     <div class="kpi-grid">
                         <?php
-                        // Get real teacher statistics
-                        $total_teachers_result = pg_query($conn, "SELECT COUNT(*) as count FROM teachers");
-                        $total_teachers = pg_fetch_assoc($total_teachers_result)['count'] ?? 0;
+                        // FORCE FRESH QUERY - Clear any potential cache
+                        // Verify database connection
+                        if (!$conn) {
+                            include 'db.php';
+                        }
                         
-                        $active_login_result = pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NOT NULL AND password IS NOT NULL AND username != ''");
-                        $active_logins = pg_fetch_assoc($active_login_result)['count'] ?? 0;
+                        // Get real teacher statistics with error checking
+                        $total_teachers = 0;
+                        $total_teachers_result = pg_query($conn, "SELECT COUNT(*)::integer as count FROM teachers");
+                        if ($total_teachers_result) {
+                            $row = pg_fetch_assoc($total_teachers_result);
+                            $total_teachers = (int)$row['count'];
+                        } else {
+                            error_log("Failed to query teachers count: " . pg_last_error($conn));
+                        }
                         
-                        $no_login_result = pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NULL OR password IS NULL OR username = ''");
-                        $no_logins = pg_fetch_assoc($no_login_result)['count'] ?? 0;
+                        // FORCE DEBUG: Check if we're getting the right value
+                        error_log("DEBUG: Total teachers count = " . $total_teachers);
                         
-                        $total_assignments_result = pg_query($conn, "SELECT COUNT(*) as count FROM teacher_subjects");
-                        $total_assignments = pg_fetch_assoc($total_assignments_result)['count'] ?? 0;
+                        // Double check with a fresh query
+                        $verify_result = pg_query($conn, "SELECT COUNT(*) FROM teachers");
+                        $verify_count = pg_fetch_result($verify_result, 0, 0);
+                        error_log("DEBUG: Verify count = " . $verify_count);
+                        
+                        // Use the verified count
+                        $total_teachers = (int)$verify_count;
+                        
+                        // Count teachers with login credentials
+                        $active_logins = 0;
+                        $active_login_result = pg_query($conn, "SELECT COUNT(*)::integer as count FROM teachers WHERE username IS NOT NULL AND password IS NOT NULL AND username != ''");
+                        if ($active_login_result) {
+                            $row = pg_fetch_assoc($active_login_result);
+                            $active_logins = (int)$row['count'];
+                        }
+                        
+                        // Count teachers without login credentials
+                        $no_logins = 0;
+                        $no_login_result = pg_query($conn, "SELECT COUNT(*)::integer as count FROM teachers WHERE username IS NULL OR password IS NULL OR username = ''");
+                        if ($no_login_result) {
+                            $row = pg_fetch_assoc($no_login_result);
+                            $no_logins = (int)$row['count'];
+                        }
+                        
+                        // Count subjects without teachers assigned
+                        $subjects_no_teacher = 0;
+                        $subjects_no_teacher_result = pg_query($conn, "
+                            SELECT COUNT(*) as count 
+                            FROM subjects s 
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM teacher_subjects ts WHERE ts.subject_id = s.id
+                            )
+                        ");
+                        if ($subjects_no_teacher_result) {
+                            $row = pg_fetch_assoc($subjects_no_teacher_result);
+                            $subjects_no_teacher = (int)$row['count'];
+                        }
                         ?>
                         
                         <div class="kpi-card">
-                            <div class="kpi-icon">
-                                <i class="fas fa-chalkboard-teacher"></i>
-                            </div>
+                            <div class="blob"></div>
+                            <div class="bg"></div>
                             <div class="kpi-content">
                                 <div class="kpi-value"><?= $total_teachers ?></div>
                                 <div class="kpi-label" data-translate="total_teachers">Total Teachers</div>
@@ -5301,9 +5985,8 @@ if ($page == 'reports') {
                         </div>
                         
                         <div class="kpi-card">
-                            <div class="kpi-icon">
-                                <i class="fas fa-check-circle"></i>
-                            </div>
+                            <div class="blob"></div>
+                            <div class="bg"></div>
                             <div class="kpi-content">
                                 <div class="kpi-value"><?= $active_logins ?></div>
                                 <div class="kpi-label" data-translate="active_logins">Active Logins</div>
@@ -5311,9 +5994,8 @@ if ($page == 'reports') {
                         </div>
                         
                         <div class="kpi-card">
-                            <div class="kpi-icon">
-                                <i class="fas fa-user-lock"></i>
-                            </div>
+                            <div class="blob"></div>
+                            <div class="bg"></div>
                             <div class="kpi-content">
                                 <div class="kpi-value"><?= $no_logins ?></div>
                                 <div class="kpi-label" data-translate="no_access">No Access</div>
@@ -5321,43 +6003,75 @@ if ($page == 'reports') {
                         </div>
                         
                         <div class="kpi-card">
-                            <div class="kpi-icon">
-                                <i class="fas fa-book"></i>
-                            </div>
+                            <div class="blob"></div>
+                            <div class="bg"></div>
                             <div class="kpi-content">
-                                <div class="kpi-value"><?= $total_assignments ?></div>
-                                <div class="kpi-label" data-translate="total_assignments">Subject Assignments</div>
+                                <div class="kpi-value"><?= $subjects_no_teacher ?></div>
+                                <div class="kpi-label" data-translate="subjects_no_teacher">Subjects Without Teacher</div>
                             </div>
                         </div>
                     </div>
 
+                    <!-- Force KPI Update Script -->
+                    <script>
+                    (function() {
+                        // Force update KPI values from PHP (bypass any cache)
+                        const kpiValues = {
+                            teachers: <?= $total_teachers ?>,
+                            activeLogins: <?= $active_logins ?>,
+                            noLogins: <?= $no_logins ?>,
+                            subjectsNoTeacher: <?= $subjects_no_teacher ?>
+                        };
+                        
+                        console.log('Teacher Dashboard KPI Values from DB:', kpiValues);
+                        
+                        // Wait for DOM to be fully loaded
+                        if (document.readyState === 'loading') {
+                            document.addEventListener('DOMContentLoaded', updateKPIs);
+                        } else {
+                            updateKPIs();
+                        }
+                        
+                        function updateKPIs() {
+                            const kpiCards = document.querySelectorAll('.kpi-grid .kpi-card');
+                            if (kpiCards.length >= 4) {
+                                // Update each KPI card
+                                kpiCards[0].querySelector('.kpi-value').textContent = kpiValues.teachers;
+                                kpiCards[1].querySelector('.kpi-value').textContent = kpiValues.activeLogins;
+                                kpiCards[2].querySelector('.kpi-value').textContent = kpiValues.noLogins;
+                                kpiCards[3].querySelector('.kpi-value').textContent = kpiValues.subjectsNoTeacher;
+                                
+                                console.log('✅ KPI values force updated!');
+                                console.log('Teachers KPI now shows:', kpiCards[0].querySelector('.kpi-value').textContent);
+                            }
+                        }
+                        
+                        // Also update after a slight delay to override any other scripts
+                        setTimeout(updateKPIs, 100);
+                        setTimeout(updateKPIs, 500);
+                    })();
+                    </script>
+
                     <!-- Charts Section -->
                     <div class="charts-grid">
                         <div class="chart-card">
-                            <h3 class="chart-title">Teachers by Specialization</h3>
+                            <h3 class="chart-title" data-translate="chart_teachers_by_spec">Teachers by Specialization</h3>
                             <div class="chart-container">
                                 <canvas id="teacherSpecializationChart"></canvas>
                             </div>
                         </div>
                         
                         <div class="chart-card">
-                            <h3 class="chart-title">Teachers by Degree</h3>
+                            <h3 class="chart-title" data-translate="chart_teachers_by_degree">Teachers by Degree</h3>
                             <div class="chart-container">
                                 <canvas id="teacherDegreeChart"></canvas>
                             </div>
                         </div>
                         
                         <div class="chart-card">
-                            <h3 class="chart-title">Login Status Distribution</h3>
+                            <h3 class="chart-title" data-translate="chart_teachers_by_subject">Teachers by Subject</h3>
                             <div class="chart-container">
-                                <canvas id="loginStatusChart"></canvas>
-                            </div>
-                        </div>
-                        
-                        <div class="chart-card">
-                            <h3 class="chart-title">Subject Assignments</h3>
-                            <div class="chart-container">
-                                <canvas id="subjectAssignmentsChart"></canvas>
+                                <canvas id="teachersBySubjectChart"></canvas>
                             </div>
                         </div>
                     </div>
@@ -5365,22 +6079,22 @@ if ($page == 'reports') {
                     <!-- Teacher Credential Management Table -->
                     <div class="data-table-section" data-aos="fade-up">
                         <div class="section-header">
-                            <h3 class="section-title">Teacher Credential Management</h3>
+                            <h3 class="section-title" data-translate="teacher_credential_mgmt">Teacher Credential Management</h3>
                             <div class="export-actions">
-                                <button class="export-btn" onclick="printTable()">Print</button>
+                                <button class="export-btn" onclick="printTable()" data-translate="print_btn">Print</button>
                             </div>
                         </div>
 
                         <!-- Filter Bar -->
                         <div class="filter-sections" style="margin-bottom: 1rem;">
                             <div class="filter-section">
-                                <label class="filter-label">Search Teacher</label>
-                                <input type="text" id="searchTeacherAccess" class="premium-select" placeholder="Search by name..." onkeyup="filterTeacherAccess()">
+                                <label class="filter-label" data-translate="search_teacher_label">Search Teacher</label>
+                                <input type="text" id="searchTeacherAccess" class="premium-select" data-translate-placeholder="search_by_name" placeholder="Search by name..." onkeyup="filterTeacherAccess()">
                             </div>
                             <div class="filter-section">
-                                <label class="filter-label">Filter by Specialization</label>
+                                <label class="filter-label" data-translate="filter_by_spec">Filter by Specialization</label>
                                 <select id="filterSpecialization" class="premium-select" onchange="filterTeacherAccess()">
-                                    <option value="">All Specializations</option>
+                                    <option value="" data-translate="all_specializations">All Specializations</option>
                                     <?php
                                     $spec_query = "SELECT DISTINCT specialization FROM teachers WHERE specialization IS NOT NULL ORDER BY specialization";
                                     $spec_result = pg_query($conn, $spec_query);
@@ -5391,17 +6105,17 @@ if ($page == 'reports') {
                                 </select>
                             </div>
                             <div class="filter-section">
-                                <label class="filter-label">Filter by Status</label>
+                                <label class="filter-label" data-translate="filter_by_status">Filter by Status</label>
                                 <select id="filterLoginStatus" class="premium-select" onchange="filterTeacherAccess()">
-                                    <option value="">All</option>
-                                    <option value="active">Has Login</option>
-                                    <option value="no_login">No Login</option>
+                                    <option value="" data-translate="all_statuses">All</option>
+                                    <option value="active" data-translate="has_login">Has Login</option>
+                                    <option value="no_login" data-translate="no_login_option">No Login</option>
                                 </select>
                             </div>
                             <div class="filter-section">
-                                <label class="filter-label">Filter by Degree</label>
+                                <label class="filter-label" data-translate="filter_by_degree">Filter by Degree</label>
                                 <select id="filterDegree" class="premium-select" onchange="filterTeacherAccess()">
-                                    <option value="">All Degrees</option>
+                                    <option value="" data-translate="all_degrees">All Degrees</option>
                                     <?php
                                     $degree_query = "SELECT DISTINCT degree FROM teachers WHERE degree IS NOT NULL ORDER BY degree";
                                     $degree_result = pg_query($conn, $degree_query);
@@ -5417,15 +6131,15 @@ if ($page == 'reports') {
                             <table id="teacherAccessTable">
                                 <thead>
                                     <tr>
-                                        <th>ID</th>
-                                        <th>Teacher Name</th>
-                                        <th>Contact Email</th>
-                                        <th>Specialization</th>
-                                        <th>Degree</th>
-                                        <th>Login Username</th>
-                                        <th>Status</th>
-                                        <th>Subjects</th>
-                                        <th>Actions</th>
+                                        <th data-translate="th_id">ID</th>
+                                        <th data-translate="th_teacher_name">Teacher Name</th>
+                                        <th data-translate="th_contact_email">Contact Email</th>
+                                        <th data-translate="th_specialization">Specialization</th>
+                                        <th data-translate="th_degree">Degree</th>
+                                        <th data-translate="th_login_username">Login Username</th>
+                                        <th data-translate="th_status">Status</th>
+                                        <th data-translate="th_subjects">Subjects</th>
+                                        <th data-translate="th_actions">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -5466,14 +6180,14 @@ if ($page == 'reports') {
                                                     <?= htmlspecialchars($teacher['username']) ?>
                                                 </span>
                                             <?php else: ?>
-                                                <span style="color: #94a3b8;">Not Set</span>
+                                                <span style="color: #94a3b8;" data-translate="not_set">Not Set</span>
                                             <?php endif; ?>
                                         </td>
                                         <td style="text-align: center;">
                                             <?php if ($has_login): ?>
-                                                <span class="badge badge-success">Active</span>
+                                                <span class="badge badge-success" data-translate="status_active">Active</span>
                                             <?php else: ?>
-                                                <span class="badge badge-danger">No Access</span>
+                                                <span class="badge badge-danger" data-translate="no_access">No Access</span>
                                             <?php endif; ?>
                                         </td>
                                         <td style="text-align: center;">
@@ -5483,8 +6197,8 @@ if ($page == 'reports') {
                                         </td>
                                         <td style="text-align: center;">
                                             <button class="action-btn edit" 
-                                                    onclick="openCredentialModal(<?= $teacher['id'] ?>, '<?= htmlspecialchars($teacher['name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($teacher['username'] ?? '', ENT_QUOTES) ?>')">
-                                                <?= $has_login ? 'Update' : 'Create' ?> Access
+                                                    onclick="openCredentialModal(<?= $teacher['id'] ?>, '<?= htmlspecialchars($teacher['name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($teacher['username'] ?? '', ENT_QUOTES) ?>', <?= $has_login ? 'true' : 'false' ?>, '<?= htmlspecialchars(!empty($teacher['password_plain']) ? base64_decode($teacher['password_plain']) : '', ENT_QUOTES) ?>')">
+                                                <?= $has_login ? '<span data-translate="update_access">Update Access</span>' : '<span data-translate="create_access">Create Access</span>' ?>
                                             </button>
                                         </td>
                                     </tr>
@@ -5493,7 +6207,7 @@ if ($page == 'reports') {
                                     else:
                                     ?>
                                     <tr>
-                                        <td colspan="9" style="text-align: center; padding: 2rem; color: #64748b;">
+                                        <td colspan="9" style="text-align: center; padding: 2rem; color: #64748b;" data-translate="no_teachers_found">
                                             No teachers found
                                         </td>
                                     </tr>
@@ -5509,7 +6223,7 @@ if ($page == 'reports') {
             <div id="credentialModal" class="modal" style="display: none;">
                 <div class="modal-content" style="max-width: 500px;">
                     <div class="modal-header">
-                        <h3 id="modalTitle">Create Teacher Access</h3>
+                        <h3 id="modalTitle" data-translate="create_teacher_access">Create Teacher Access</h3>
                         <span class="close" onclick="closeCredentialModal()">&times;</span>
                     </div>
                     <div class="modal-body">
@@ -5517,27 +6231,27 @@ if ($page == 'reports') {
                             <input type="hidden" id="credential_teacher_id" name="teacher_id">
                             
                             <div class="form-group">
-                                <label>Teacher Name</label>
+                                <label data-translate="modal_teacher_name">Teacher Name</label>
                                 <input type="text" id="credential_teacher_name" class="premium-select" readonly>
                             </div>
                             
                             <div class="form-group">
-                                <label>Login Email/Username *</label>
+                                <label data-translate="modal_login_username">Login Email/Username *</label>
                                 <input type="text" id="credential_username" name="username" class="premium-select" 
-                                       placeholder="teacher.email@school.edu" required>
-                                <small style="color: #64748b; font-size: 0.85rem;">This will be used for login</small>
+                                       data-translate-placeholder="modal_username_placeholder" placeholder="teacher.email@school.edu" required>
+                                <small style="color: #64748b; font-size: 0.85rem;" data-translate="modal_username_hint">This will be used for login</small>
                             </div>
                             
                             <div class="form-group">
-                                <label>Password *</label>
+                                <label><span data-translate="modal_password">Password</span> <span id="passwordNote" style="color: #64748b; font-size: 0.85rem;"></span></label>
                                 <input type="text" id="credential_password" name="password" class="premium-select" 
-                                       placeholder="Enter password" required>
-                                <small style="color: #64748b; font-size: 0.85rem;">Minimum 6 characters</small>
+                                       data-translate-placeholder="modal_password_placeholder" placeholder="Enter new password">
+                                <small style="color: #64748b; font-size: 0.85rem;" data-translate="modal_password_hint">Minimum 6 characters. Leave blank to keep current password.</small>
                             </div>
                             
                             <div class="form-actions" style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
-                                <button type="button" class="action-btn delete" onclick="closeCredentialModal()">Cancel</button>
-                                <button type="submit" class="action-btn edit">Save Credentials</button>
+                                <button type="button" class="action-btn delete" onclick="closeCredentialModal()" data-translate="modal_cancel">Cancel</button>
+                                <button type="submit" class="action-btn edit" data-translate="modal_save">Save Credentials</button>
                             </div>
                         </form>
                     </div>
@@ -5550,9 +6264,9 @@ if ($page == 'reports') {
 
         <?php elseif ($page == 'graduated'): ?>
             <!-- GRADUATED STUDENTS PAGE -->
-            <div class="content-wrapper">
+            <div class="content-wrapper page-graduated">
                 <div class="dashboard-header">
-                    <h1 data-translate="graduated_title">🎓 Graduated Students</h1>
+                    <h1 data-translate="graduated_title">Graduated Students</h1>
                     <p class="dashboard-subtitle" data-translate="manage_graduated_students">View all graduated students</p>
                 </div>
                 <div class="reports-main-content">
@@ -5655,9 +6369,9 @@ if ($page == 'reports') {
 
         <?php elseif ($page == 'teachers'): ?>
             <!-- TEACHERS PAGE -->
-            <div class="content-wrapper">
+            <div class="content-wrapper page-teachers">
                 <div class="dashboard-header">
-                    <h1 data-translate="teachers_title">👨‍🏫 Teachers Management</h1>
+                    <h1 data-translate="teachers_title">Teachers Management</h1>
                     <p class="dashboard-subtitle" data-translate="manage_teacher_info">Manage teachers and subject assignments</p>
                 </div>
                 <div class="reports-main-content">
@@ -5702,13 +6416,13 @@ if ($page == 'reports') {
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="degree">Degree *</label>
                                     <select name="degree" class="premium-select" required>
-                                        <option value="">Select Degree</option>
-                                        <option value="High School Diploma">High School Diploma</option>
-                                        <option value="Associate Degree">Associate Degree</option>
-                                        <option value="Bachelor's Degree">Bachelor's Degree</option>
-                                        <option value="Master's Degree">Master's Degree</option>
-                                        <option value="Doctorate (PhD)">Doctorate (PhD)</option>
-                                        <option value="Professional Certificate">Professional Certificate</option>
+                                        <option value="" data-translate="select_degree">Select Degree</option>
+                                        <option value="High School Diploma" data-translate="degree_high_school">High School Diploma</option>
+                                        <option value="Associate Degree" data-translate="degree_associate">Associate Degree</option>
+                                        <option value="Bachelor's Degree" data-translate="degree_bachelor">Bachelor's Degree</option>
+                                        <option value="Master's Degree" data-translate="degree_master">Master's Degree</option>
+                                        <option value="Doctorate (PhD)" data-translate="degree_doctorate">Doctorate (PhD)</option>
+                                        <option value="Professional Certificate" data-translate="degree_certificate">Professional Certificate</option>
                                     </select>
                                 </div>
                                 <div class="filter-section">
@@ -5718,7 +6432,7 @@ if ($page == 'reports') {
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="assigned_subjects">Assigned Subject (Optional)</label>
                                     <select name="subject_id" id="addTeacherSubject" class="premium-select" onchange="updateAddTeacherYear()">
-                                        <option value="">No subject assignment</option>
+                                        <option value="" data-translate="no_subject_assignment">No subject assignment</option>
                                         <?php
                                         $subjects_query = "SELECT id, subject_name, year FROM subjects ORDER BY year, subject_name";
                                         $subjects_result = pg_query($conn, $subjects_query);
@@ -5733,16 +6447,16 @@ if ($page == 'reports') {
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="year">Year</label>
                                     <select name="year" id="addTeacherYear" class="premium-select" disabled>
-                                        <option value="">Select subject first</option>
+                                        <option value="" data-translate="select_subject_first">Select subject first</option>
                                     </select>
                                 </div>
                                 <div class="filter-section">
                                     <label class="filter-label" data-translate="class">Class</label>
                                     <select name="class_level" class="premium-select">
-                                        <option value="">No class assignment</option>
-                                        <option value="A">Class A</option>
-                                        <option value="B">Class B</option>
-                                        <option value="C">Class C</option>
+                                        <option value="" data-translate="no_class_assignment">No class assignment</option>
+                                        <option value="A" data-translate="class_a">Class A</option>
+                                        <option value="B" data-translate="class_b">Class B</option>
+                                        <option value="C" data-translate="class_c">Class C</option>
                                     </select>
                                 </div>
                                 <div class="filter-section">
@@ -5912,10 +6626,10 @@ if ($page == 'reports') {
                                                 </h4>
                                                 <?php
                                                 $assignments_query = "SELECT ts.*, s.subject_name, s.year as subject_year,
-                                                                            COUNT(DISTINCT ss.student_id) as student_count
+                                                                            COUNT(DISTINCT m.student_id) as student_count
                                                                      FROM teacher_subjects ts
                                                                      JOIN subjects s ON ts.subject_id = s.id
-                                                                     LEFT JOIN student_subjects ss ON s.id = ss.subject_id
+                                                                     LEFT JOIN marks m ON s.id = m.subject_id
                                                                      WHERE ts.teacher_id = $1
                                                                      GROUP BY ts.id, s.subject_name, s.year, ts.year, ts.class_level
                                                                      ORDER BY ts.year, ts.class_level, s.subject_name";
@@ -5936,12 +6650,12 @@ if ($page == 'reports') {
                                                         </thead>
                                                         <tbody>
                                                             <?php while($assignment = pg_fetch_assoc($assignments_result)): ?>
-                                                            <tr>
+                                                            <tr data-year="<?= $assignment['year'] ?>">
                                                                 <td><strong><?= htmlspecialchars($assignment['subject_name']) ?></strong></td>
                                                                 <td>
                                                                     <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;
                                                                                  background: #f5f5f5; color: #000000; border: 1px solid #e0e0e0;">
-                                                                        Year <?= $assignment['year'] ?>
+                                                                        <span data-translate="year">Year</span> <?= $assignment['year'] ?>
                                                                     </span>
                                                                 </td>
                                                                 <td>
@@ -5990,9 +6704,9 @@ if ($page == 'reports') {
 
         <?php elseif ($page == 'subjects'): ?>
             <!-- SUBJECTS PAGE -->
-            <div class="content-wrapper">
+            <div class="content-wrapper page-subjects">
                 <div class="dashboard-header">
-                    <h1 data-translate="subjects_title">📚 Subjects Management</h1>
+                    <h1 data-translate="subjects_title">Subjects Management</h1>
                     <p class="dashboard-subtitle" data-translate="manage_subjects_curriculum">Manage subjects and curriculum</p>
                 </div>
                 <div class="reports-main-content">
@@ -6178,9 +6892,9 @@ if ($page == 'reports') {
 
         <?php elseif ($page == 'marks'): ?>
             <!-- MARKS PAGE -->
-            <div class="content-wrapper">
+            <div class="content-wrapper page-marks">
                 <div class="dashboard-header">
-                    <h1 data-translate="marks_title">📝 Marks Management</h1>
+                    <h1 data-translate="marks_title">Marks Management</h1>
                     <p class="dashboard-subtitle" data-translate="input_manage_marks">Input and manage student marks</p>
                 </div>
                 <div class="reports-main-content">
@@ -6215,16 +6929,16 @@ if ($page == 'reports') {
                                     </select>
                                 </div>
                                 <div class="filter-section">
-                                    <label class="filter-label">Filter by Subject</label>
+                                    <label class="filter-label" data-translate="filter_by_subject">Filter by Subject</label>
                                     <select id="filterMarksSubject" class="premium-select" onchange="filterMarks()">
-                                        <option value="">All Subjects</option>
+                                        <option value="" data-translate="all_subjects">All Subjects</option>
                                         <!-- Options will be populated dynamically -->
                                     </select>
                                 </div>
                                 <div class="filter-section">
-                                    <label class="filter-label">Filter by Teacher</label>
+                                    <label class="filter-label" data-translate="filter_by_teacher">Filter by Teacher</label>
                                     <select id="filterMarksTeacher" class="premium-select" onchange="filterMarks()">
-                                        <option value="">All Teachers</option>
+                                        <option value="" data-translate="all_teachers">All Teachers</option>
                                         <?php
                                         // Get all teachers for filter
                                         $teachers_filter_query = "SELECT DISTINCT id, name FROM teachers ORDER BY name";
@@ -6238,11 +6952,11 @@ if ($page == 'reports') {
                                     </select>
                                 </div>
                                 <div class="filter-section">
-                                    <label class="filter-label">Sort by Final Grade</label>
+                                    <label class="filter-label" data-translate="sort_by_final_grade">Sort by Final Grade</label>
                                     <select id="sortMarksByGrade" class="premium-select" onchange="filterMarks()">
-                                        <option value="">Default</option>
-                                        <option value="asc">Grade: Low to High</option>
-                                        <option value="desc">Grade: High to Low</option>
+                                        <option value="" data-translate="sort_default">Default</option>
+                                        <option value="asc" data-translate="sort_grade_low_high">Grade: Low to High</option>
+                                        <option value="desc" data-translate="sort_grade_high_low">Grade: High to Low</option>
                                     </select>
                                 </div>
                                 <div class="filter-section">
@@ -6434,7 +7148,7 @@ if ($page == 'reports') {
                                         <td style="text-align: center;">
                                             <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
                                                          background: #f5f5f5; color: #000000; border: 1px solid #e0e0e0;">
-                                                Year <?= $student['student_year'] ?>
+                                                <span data-translate="year">Year</span> <?= $student['student_year'] ?>
                                             </span>
                                         </td>
                                         <td style="text-align: center;">
@@ -6572,10 +7286,11 @@ if ($page == 'reports') {
     <script>
         // Initialize AOS (Animate On Scroll)
         AOS.init({
-            duration: 800,
+            duration: 600,
             easing: 'ease-in-out',
             once: true,
-            offset: 100
+            offset: 20,
+            delay: 0
         });
 
         // Global subjects data for filters
@@ -6891,54 +7606,11 @@ if ($page == 'reports') {
             }
         }
         
-        // Function to initialize blur text animations for dashboard headers
-        function initializeHeaderAnimations() {
-            const headers = document.querySelectorAll('.dashboard-header h1');
-            const subtitles = document.querySelectorAll('.dashboard-header .dashboard-subtitle');
-            
-            headers.forEach(h1 => {
-                // Skip if already initialized
-                if (h1.blurTextInstance) {
-                    h1.blurTextInstance.reset();
-                    return;
-                }
-                
-                // Note: BlurText will auto-detect RTL and use words instead of characters
-                const blurText = new BlurText(h1, {
-                    animateBy: 'characters', // Will be overridden to 'words' for RTL
-                    delay: 35,
-                    direction: 'top',
-                    threshold: 0.1,
-                    stepDuration: 350
-                });
-                
-                h1.blurTextInstance = blurText;
-            });
-            
-            subtitles.forEach(p => {
-                // Skip if already initialized
-                if (p.blurTextInstance) {
-                    p.blurTextInstance.reset();
-                    return;
-                }
-                
-                const blurText = new BlurText(p, {
-                    animateBy: 'words',
-                    delay: 80,
-                    direction: 'top',
-                    threshold: 0.1,
-                    stepDuration: 400
-                });
-                
-                p.blurTextInstance = blurText;
-            });
-        }
+        // Blur text animation removed - headers use simple CSS now
         
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
-            setTimeout(() => {
-                initializeHeaderAnimations();
-            }, 200);
+            // Header animations removed for better performance
         });
 
         // Define updateGradeDistributionChart function globally so it's available immediately
@@ -6967,7 +7639,7 @@ if ($page == 'reports') {
                     // Generate dynamic colors for the new data
                     const gradeColors = {
                         'A+': '#10B981', // Green
-                        'A': '#3B82F6',  // Blue  
+                        'A': '#1e40af',  // Navy Blue  
                         'B': '#F59E0B',  // Yellow
                         'C': '#F97316',  // Orange
                         'F': '#DC2626',  // Red
@@ -7074,7 +7746,7 @@ if ($page == 'reports') {
             // Generate dynamic colors based on labels
             const gradeColors = {
                 'A+': '#10B981', // Green
-                'A': '#3B82F6',  // Blue  
+                'A': '#1e40af',  // Navy Blue  
                 'B': '#F59E0B',  // Yellow
                 'C': '#F97316',  // Orange
                 'F': '#DC2626',  // Red
@@ -7187,8 +7859,8 @@ if ($page == 'reports') {
                     datasets: [{
                         label: 'Average Score (Year 1)',
                         data: scores,
-                        backgroundColor: 'rgba(59, 130, 246, 0.8)',
-                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(30, 64, 175, 0.8)',
+                        borderColor: '#1e40af',
                         borderWidth: 2,
                         borderRadius: 8,
                         borderSkipped: false,
@@ -7203,7 +7875,7 @@ if ($page == 'reports') {
                             display: true,
                             anchor: 'end',
                             align: 'top',
-                            color: '#3b82f6',
+                            color: '#1e40af',
                             font: {
                                 family: "'Poppins', sans-serif",
                                 size: 11,
@@ -7693,7 +8365,11 @@ if ($page == 'reports') {
         document.addEventListener('DOMContentLoaded', function() {
             console.log('Initializing premium charts...');
 
-            // Year Filter Functionality
+            // Get current page
+            const currentPage = new URLSearchParams(window.location.search).get('page') || 'reports';
+            console.log('Current page:', currentPage);
+
+            // Year Filter Functionality - ONLY for Reports page
             const yearFilterInputs = document.querySelectorAll('input[name="year-filter"]');
             
             function updateKPICards(year = '') {
@@ -7814,19 +8490,21 @@ if ($page == 'reports') {
                 });
             }
 
-            // Add event listeners to year filter inputs
-            yearFilterInputs.forEach(input => {
-                input.addEventListener('change', function() {
-                    if (this.checked) {
-                        updateKPICards(this.value);
-                        updateGradeDistributionChart(this.value);
-                    }
+            // Add event listeners to year filter inputs - ONLY for Reports page
+            if (currentPage === 'reports' && yearFilterInputs.length > 0) {
+                yearFilterInputs.forEach(input => {
+                    input.addEventListener('change', function() {
+                        if (this.checked) {
+                            updateKPICards(this.value);
+                            updateGradeDistributionChart(this.value);
+                        }
+                    });
                 });
-            });
 
-            // Load All Years data by default since it's the default selected filter
-            updateKPICards('');
-            updateGradeDistributionChart('');
+                // Load All Years data by default since it's the default selected filter
+                updateKPICards('');
+                updateGradeDistributionChart('');
+            }
             
             // Grade Distribution Chart (Doughnut)
             createGradeDistributionChart();
@@ -7997,18 +8675,18 @@ if ($page == 'reports') {
             $login_active = pg_fetch_assoc(pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NOT NULL AND password IS NOT NULL"))['count'];
             $login_inactive = pg_fetch_assoc(pg_query($conn, "SELECT COUNT(*) as count FROM teachers WHERE username IS NULL OR password IS NULL"))['count'];
             
-            $subject_assign_query = "SELECT t.name, COUNT(DISTINCT ts.subject_id) as subject_count 
-                                    FROM teachers t 
-                                    LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id 
-                                    GROUP BY t.id, t.name 
-                                    ORDER BY subject_count DESC 
-                                    LIMIT 10";
-            $subject_assign_result = pg_query($conn, $subject_assign_query);
-            $teacher_names = [];
-            $subject_counts = [];
-            while ($row = pg_fetch_assoc($subject_assign_result)) {
-                $teacher_names[] = $row['name'];
-                $subject_counts[] = (int)$row['subject_count'];
+            // Teachers by Subject Query
+            $teachers_by_subject_query = "SELECT s.subject_name, COUNT(DISTINCT ts.teacher_id) as teacher_count 
+                                         FROM subjects s 
+                                         LEFT JOIN teacher_subjects ts ON s.id = ts.subject_id 
+                                         GROUP BY s.id, s.subject_name 
+                                         ORDER BY teacher_count DESC, s.subject_name ASC";
+            $teachers_by_subject_result = pg_query($conn, $teachers_by_subject_query);
+            $subject_names = [];
+            $teachers_per_subject = [];
+            while ($row = pg_fetch_assoc($teachers_by_subject_result)) {
+                $subject_names[] = $row['subject_name'];
+                $teachers_per_subject[] = (int)$row['teacher_count'];
             }
             ?>
             
@@ -8022,9 +8700,9 @@ if ($page == 'reports') {
                         datasets: [{
                             data: <?= json_encode($spec_counts) ?>,
                             backgroundColor: [
-                                '#667eea', '#764ba2', '#f093fb', '#4facfe',
-                                '#43e97b', '#fa709a', '#fee140', '#30cfd0',
-                                '#a8edea', '#fed6e3', '#c471f5', '#12c2e9'
+                                '#1e40af', '#10b981', '#f59e0b', '#8b5cf6',
+                                '#ef4444', '#ec4899', '#14b8a6', '#f97316',
+                                '#6366f1', '#84cc16', '#a855f7', '#06b6d4'
                             ],
                             borderWidth: 2,
                             borderColor: '#ffffff'
@@ -8064,8 +8742,8 @@ if ($page == 'reports') {
                         datasets: [{
                             label: 'Teachers',
                             data: <?= json_encode($degree_counts) ?>,
-                            backgroundColor: 'rgba(102, 126, 234, 0.8)',
-                            borderColor: 'rgba(102, 126, 234, 1)',
+                            backgroundColor: 'rgba(30, 64, 175, 0.8)',
+                            borderColor: 'rgba(30, 64, 175, 1)',
                             borderWidth: 2,
                             borderRadius: 8
                         }]
@@ -8105,90 +8783,70 @@ if ($page == 'reports') {
                 });
             }
             
-            // Login Status Chart
-            const loginCtx = document.getElementById('loginStatusChart');
-            if (loginCtx) {
-                new Chart(loginCtx, {
-                    type: 'pie',
+            // Teachers by Subject Chart (Radar Chart)
+            const teachersBySubjectCtx = document.getElementById('teachersBySubjectChart');
+            if (teachersBySubjectCtx) {
+                new Chart(teachersBySubjectCtx, {
+                    type: 'radar',
                     data: {
-                        labels: ['Active Login', 'No Login Set'],
+                        labels: <?= json_encode($subject_names) ?>,
                         datasets: [{
-                            data: [<?= $login_active ?>, <?= $login_inactive ?>],
-                            backgroundColor: ['#10b981', '#ef4444'],
-                            borderWidth: 2,
-                            borderColor: '#ffffff'
+                            label: 'Teachers Assigned',
+                            data: <?= json_encode($teachers_per_subject) ?>,
+                            backgroundColor: 'rgba(30, 64, 175, 0.2)',
+                            borderColor: '#1e40af',
+                            borderWidth: 3,
+                            pointBackgroundColor: '#1e40af',
+                            pointBorderColor: '#ffffff',
+                            pointBorderWidth: 2,
+                            pointRadius: 5,
+                            pointHoverRadius: 7,
+                            pointHoverBackgroundColor: '#1e40af',
+                            pointHoverBorderColor: '#ffffff'
                         }]
                     },
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
                         plugins: {
-                            legend: {
-                                position: 'bottom',
-                                labels: {
-                                    font: { family: "'Poppins', sans-serif", size: 12, weight: '600' },
-                                    padding: 15,
-                                    color: '#334155'
-                                }
+                            legend: { 
+                                display: false
                             },
                             tooltip: {
                                 backgroundColor: 'rgba(37, 46, 69, 0.95)',
                                 titleFont: { family: "'Poppins', sans-serif", size: 14, weight: '600' },
                                 bodyFont: { family: "'Poppins', sans-serif", size: 13 },
                                 padding: 12,
-                                cornerRadius: 8
-                            }
-                        }
-                    }
-                });
-            }
-            
-            // Subject Assignments Chart
-            const assignCtx = document.getElementById('subjectAssignmentsChart');
-            if (assignCtx) {
-                new Chart(assignCtx, {
-                    type: 'horizontalBar',
-                    data: {
-                        labels: <?= json_encode($teacher_names) ?>,
-                        datasets: [{
-                            label: 'Subjects Taught',
-                            data: <?= json_encode($subject_counts) ?>,
-                            backgroundColor: 'rgba(59, 130, 246, 0.8)',
-                            borderColor: 'rgba(59, 130, 246, 1)',
-                            borderWidth: 2,
-                            borderRadius: 6
-                        }]
-                    },
-                    options: {
-                        indexAxis: 'y',
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {
-                            legend: { display: false },
-                            tooltip: {
-                                backgroundColor: 'rgba(37, 46, 69, 0.95)',
-                                titleFont: { family: "'Poppins', sans-serif", size: 14, weight: '600' },
-                                bodyFont: { family: "'Poppins', sans-serif", size: 13 },
-                                padding: 12,
-                                cornerRadius: 8
+                                cornerRadius: 8,
+                                callbacks: {
+                                    label: function(context) {
+                                        const value = context.parsed.r;
+                                        return value + ' teacher' + (value !== 1 ? 's' : '');
+                                    }
+                                }
                             }
                         },
                         scales: {
-                            x: {
+                            r: {
                                 beginAtZero: true,
+                                min: 0,
+                                max: Math.max(...<?= json_encode($teachers_per_subject) ?>) + 1,
                                 ticks: {
+                                    stepSize: 1,
                                     font: { family: "'Poppins', sans-serif", size: 11 },
                                     color: '#64748b',
-                                    stepSize: 1
+                                    backdropColor: 'transparent'
                                 },
-                                grid: { color: 'rgba(0,0,0,0.05)' }
-                            },
-                            y: {
-                                ticks: {
-                                    font: { family: "'Poppins', sans-serif", size: 10 },
-                                    color: '#64748b'
+                                pointLabels: {
+                                    font: { family: "'Poppins', sans-serif", size: 12, weight: '600' },
+                                    color: '#334155'
                                 },
-                                grid: { display: false }
+                                grid: {
+                                    color: 'rgba(0, 0, 0, 0.1)'
+                                },
+                                angleLines: {
+                                    color: 'rgba(0, 0, 0, 0.1)'
+                                }
                             }
                         }
                     }
@@ -10456,7 +11114,12 @@ if ($page == 'reports') {
             const currentValue = subjectSelect.value;
             
             // Clear current options except "All Subjects"
-            subjectSelect.innerHTML = '<option value="">All Subjects</option>';
+            const allSubjectsOption = document.createElement('option');
+            allSubjectsOption.value = '';
+            allSubjectsOption.setAttribute('data-translate', 'all_subjects');
+            allSubjectsOption.textContent = getTranslation('all_subjects');
+            subjectSelect.innerHTML = '';
+            subjectSelect.appendChild(allSubjectsOption);
             
             // Get all subjects from the data
             if (typeof allSubjects !== 'undefined' && allSubjects) {
@@ -10490,7 +11153,12 @@ if ($page == 'reports') {
             const currentValue = subjectSelect.value;
             
             // Clear current options except "All Subjects"
-            subjectSelect.innerHTML = '<option value="">All Subjects</option>';
+            const allSubjectsOption = document.createElement('option');
+            allSubjectsOption.value = '';
+            allSubjectsOption.setAttribute('data-translate', 'all_subjects');
+            allSubjectsOption.textContent = getTranslation('all_subjects');
+            subjectSelect.innerHTML = '';
+            subjectSelect.appendChild(allSubjectsOption);
             
             // Get all subjects from the data
             if (typeof allSubjects !== 'undefined' && allSubjects) {
@@ -10829,7 +11497,7 @@ if ($page == 'reports') {
                 if (cells.length === 0) return; // Skip empty rows
                 
                 const studentName = cells[0].textContent.toLowerCase();
-                const yearText = cells[1].textContent;
+                const studentYear = row.getAttribute('data-year'); // Get year from data attribute
                 const classLevel = cells[2].textContent.trim();
                 
                 // Get final grade for sorting
@@ -10844,11 +11512,8 @@ if ($page == 'reports') {
                 }
                 
                 // Year filter
-                if (yearFilter) {
-                    const studentYear = yearText.includes('Year 1') ? '1' : '2';
-                    if (studentYear !== yearFilter) {
-                        matches = false;
-                    }
+                if (yearFilter && studentYear !== yearFilter) {
+                    matches = false;
                 }
                 
                 // Class filter
@@ -11203,7 +11868,7 @@ if ($page == 'reports') {
                     }
                 }
                 
-                let subjectsHTML = '<option value="">All Subjects</option>';
+                let subjectsHTML = `<option value="" data-translate="all_subjects">${getTranslation('all_subjects')}</option>`;
                 Array.from(availableSubjects).sort().forEach(subject => {
                     subjectsHTML += `<option value="${subject}">${subject}</option>`;
                 });
@@ -11211,10 +11876,10 @@ if ($page == 'reports') {
                 
                 // Show all classes
                 classFilterSelect.innerHTML = `
-                    <option value="">All Classes</option>
-                    <option value="A">Class A</option>
-                    <option value="B">Class B</option>
-                    <option value="C">Class C</option>
+                    <option value="" data-translate="all_classes">${getTranslation('all_classes')}</option>
+                    <option value="A" data-translate="class_a">Class A</option>
+                    <option value="B" data-translate="class_b">Class B</option>
+                    <option value="C" data-translate="class_c">Class C</option>
                 `;
             } else {
                 // Get available subjects and classes for the selected year
@@ -11239,17 +11904,17 @@ if ($page == 'reports') {
                 }
                 
                 // Build subject options
-                let subjectsHTML = '<option value="">All Subjects</option>';
+                let subjectsHTML = `<option value="" data-translate="all_subjects">${getTranslation('all_subjects')}</option>`;
                 Array.from(availableSubjects).sort().forEach(subject => {
                     subjectsHTML += `<option value="${subject}">${subject}</option>`;
                 });
                 subjectFilterSelect.innerHTML = subjectsHTML;
                 
                 // Build class options
-                let classesHTML = '<option value="">All Classes</option>';
+                let classesHTML = `<option value="" data-translate="all_classes">${getTranslation('all_classes')}</option>`;
                 ['A', 'B', 'C'].forEach(cls => {
                     if (availableClasses.has(cls)) {
-                        classesHTML += `<option value="${cls}">Class ${cls}</option>`;
+                        classesHTML += `<option value="${cls}" data-translate="class_${cls.toLowerCase()}">Class ${cls}</option>`;
                     }
                 });
                 classFilterSelect.innerHTML = classesHTML;
@@ -11594,7 +12259,24 @@ if ($page == 'reports') {
         // Language Translation System
         const translations = {
             en: {
+                // Login Page
+                page_title: "Login - Academic Management System",
+                login_subtitle: "Sign in to access your dashboard",
+                username: "Username",
+                password: "Password",
+                sign_in: "Sign In",
+                signing_in: "Signing In...",
+                access_levels: "Access Levels",
+                administrator: "Administrator",
+                full_system_control: "Full System Control",
+                subject_management: "Subject Management",
+                secure_portal: "Secure Academic Portal",
+                error_invalid_credentials: "Invalid username or password",
+                error_empty_fields: "Please enter both username and password",
+                // Navigation
                 nav_reports: "Dashboard",
+                nav_dashboard: "Dashboard",
+                nav_access: "Access",
                 nav_students: "Students", 
                 nav_graduated: "Graduated",
                 nav_subjects: "Subjects",
@@ -11713,16 +12395,22 @@ if ($page == 'reports') {
                 grade: "Grade",
                 filter_by_class: "Filter by Class",
                 filter_by_subject: "Filter by Subject",
+                filter_by_teacher: "Filter by Teacher",
                 filter_by_grade: "Filter by Grade",
                 filter_by_gender: "Filter by Gender",
                 filter_by_age_range: "Filter by Age Range",
                 filter_by_enrollment: "Filter by Enrollment",
                 all_classes: "All Classes",
                 all_subjects: "All Subjects",
+                all_teachers: "All Teachers",
                 all_grades: "All Grades",
                 all_genders: "All Genders",
                 all_ages: "All Ages",
                 all_students: "All Students",
+                sort_by_final_grade: "Sort by Final Grade",
+                sort_default: "Default",
+                sort_grade_low_high: "Grade: Low to High",
+                sort_grade_high_low: "Grade: High to Low",
                 clear_filters: "🔄 Clear Filters",
                 collapse_all: "📁 Collapse All",
                 search: "Search",
@@ -11750,6 +12438,16 @@ if ($page == 'reports') {
                 teachers: "Teachers",
                 specialization: "Specialization",
                 select_specialization: "Select Specialization",
+                select_degree: "Select Degree",
+                degree_high_school: "High School Diploma",
+                degree_associate: "Associate Degree",
+                degree_bachelor: "Bachelor's Degree",
+                degree_master: "Master's Degree",
+                degree_doctorate: "Doctorate (PhD)",
+                degree_certificate: "Professional Certificate",
+                no_subject_assignment: "No subject assignment",
+                select_subject_first: "Select subject first",
+                no_class_assignment: "No class assignment",
                 assigned_subjects: "Assigned Subjects",
                 join_date: "Join Date",
                 add_teacher: "Add Teacher",
@@ -11768,6 +12466,80 @@ if ($page == 'reports') {
                 active: "Active",
                 inactive: "Inactive",
                 all: "All",
+                // Teacher Access Management
+                teacher_access_title: "Teacher Access Management",
+                teacher_access_subtitle: "Manage teacher login credentials and system access",
+                total_teachers: "Total Teachers",
+                active_logins: "Active Logins",
+                no_access: "No Access",
+                subjects_no_teacher: "Subjects Without Teacher",
+                teacher_credential_mgmt: "Teacher Credential Management",
+                print_btn: "Print",
+                search_teacher_label: "Search Teacher",
+                search_by_name: "Search by name...",
+                filter_by_spec: "Filter by Specialization",
+                all_specializations: "All Specializations",
+                all_statuses: "All",
+                has_login: "Has Login",
+                no_login_option: "No Login",
+                filter_by_degree: "Filter by Degree",
+                all_degrees: "All Degrees",
+                th_id: "ID",
+                th_teacher_name: "Teacher Name",
+                th_contact_email: "Contact Email",
+                th_specialization: "Specialization",
+                th_degree: "Degree",
+                th_login_username: "Login Username",
+                th_status: "Status",
+                th_subjects: "Subjects",
+                th_actions: "Actions",
+                not_set: "Not Set",
+                status_active: "Active",
+                update_access: "Update Access",
+                create_access: "Create Access",
+                no_teachers_found: "No teachers found",
+                create_teacher_access: "Create Teacher Access",
+                modal_teacher_name: "Teacher Name",
+                modal_login_username: "Login Email/Username *",
+                modal_username_placeholder: "teacher.email@school.edu",
+                modal_username_hint: "This will be used for login",
+                modal_password: "Password",
+                modal_password_placeholder: "Enter new password",
+                modal_password_hint: "Minimum 6 characters. Leave blank to keep current password.",
+                modal_cancel: "Cancel",
+                modal_save: "Save Credentials",
+                chart_teachers_by_spec: "Teachers by Specialization",
+                chart_teachers_by_degree: "Teachers by Degree",
+                chart_teachers_by_subject: "Teachers by Subject",
+                // Teacher Dashboard (Tasks)
+                academic_task_manager: "Academic Task Manager",
+                welcome: "Welcome",
+                manage_teaching_schedule: "Manage your teaching schedule and academic tasks",
+                subjects_teaching: "Subjects Teaching",
+                kpi_total_students: "Total Students",
+                upcoming_tasks: "Upcoming Tasks",
+                overdue_tasks: "Overdue Tasks",
+                create_new_task: "Create New Task",
+                task_type: "Task Type",
+                task_examination: "Examination",
+                task_homework: "Homework Assignment",
+                task_reminder: "Reminder",
+                task_note: "General Note",
+                all_subjects: "All Subjects",
+                task_title: "Title",
+                task_title_placeholder: "e.g., Midterm Exam - Chapter 1-3",
+                task_description: "Description",
+                task_description_placeholder: "Additional details...",
+                task_due_date: "Due Date",
+                task_priority: "Priority",
+                priority_low: "Low",
+                priority_medium: "Medium",
+                priority_high: "High",
+                create_task_btn: "Create Task",
+                my_subjects: "My Subjects",
+                students_label: "Students",
+                view_marks: "View Marks",
+                no_subjects_assigned: "No subjects assigned yet",
                 // End Teacher Translations
                 marks_list: "📝 Marks List",
                 search_filter_marks: "Search & Filter Marks",
@@ -11859,7 +12631,24 @@ if ($page == 'reports') {
                 email_placeholder_student: "Enter email address..."
             },
             ar: {
+                // Login Page
+                page_title: "تسجيل الدخول - نظام الإدارة الأكاديمية",
+                login_subtitle: "قم بتسجيل الدخول للوصول إلى لوحة التحكم",
+                username: "اسم المستخدم",
+                password: "كلمة المرور",
+                sign_in: "تسجيل الدخول",
+                signing_in: "جاري تسجيل الدخول...",
+                access_levels: "مستويات الوصول",
+                administrator: "المسؤول",
+                full_system_control: "التحكم الكامل بالنظام",
+                subject_management: "إدارة المواد",
+                secure_portal: "بوابة أكاديمية آمنة",
+                error_invalid_credentials: "اسم المستخدم أو كلمة المرور غير صحيحة",
+                error_empty_fields: "الرجاء إدخال اسم المستخدم وكلمة المرور",
+                // Navigation
                 nav_reports: "لوحة التحكم",
+                nav_dashboard: "لوحة التحكم",
+                nav_access: "الوصول",
                 nav_students: "الطلاب",
                 nav_graduated: "المتخرجون",
                 nav_subjects: "المواد", 
@@ -11974,16 +12763,22 @@ if ($page == 'reports') {
                 grade: "التقدير",
                 filter_by_class: "تصفية حسب الصف",
                 filter_by_subject: "تصفية حسب المادة",
+                filter_by_teacher: "تصفية حسب المعلم",
                 filter_by_grade: "تصفية حسب الدرجة",
                 filter_by_gender: "تصفية حسب الجنس",
                 filter_by_age_range: "تصفية حسب الفئة العمرية",
                 filter_by_enrollment: "تصفية حسب التسجيل",
                 all_classes: "جميع الصفوف",
                 all_subjects: "جميع المواد",
+                all_teachers: "جميع المعلمين",
                 all_grades: "جميع الدرجات",
                 all_genders: "جميع الأجناس",
                 all_ages: "جميع الأعمار",
                 all_students: "جميع الطلاب",
+                sort_by_final_grade: "ترتيب حسب الدرجة النهائية",
+                sort_default: "افتراضي",
+                sort_grade_low_high: "الدرجة: من الأدنى إلى الأعلى",
+                sort_grade_high_low: "الدرجة: من الأعلى إلى الأدنى",
                 clear_filters: "🔄 مسح التصفيات",
                 collapse_all: "📁 طي الكل",
                 search: "البحث",
@@ -12011,6 +12806,16 @@ if ($page == 'reports') {
                 teachers: "المعلمون",
                 specialization: "التخصص",
                 select_specialization: "اختر التخصص",
+                select_degree: "اختر الدرجة",
+                degree_high_school: "شهادة الثانوية العامة",
+                degree_associate: "درجة مشارك",
+                degree_bachelor: "درجة البكالوريوس",
+                degree_master: "درجة الماجستير",
+                degree_doctorate: "الدكتوراه (PhD)",
+                degree_certificate: "شهادة مهنية",
+                no_subject_assignment: "بدون تعيين مادة",
+                select_subject_first: "اختر المادة أولاً",
+                no_class_assignment: "بدون تعيين صف",
                 assigned_subjects: "المواد المكلف بها",
                 join_date: "تاريخ الانضمام",
                 add_teacher: "إضافة معلم",
@@ -12029,6 +12834,80 @@ if ($page == 'reports') {
                 active: "نشط",
                 inactive: "غير نشط",
                 all: "الكل",
+                // Teacher Access Management
+                teacher_access_title: "إدارة وصول المعلمين",
+                teacher_access_subtitle: "إدارة بيانات اعتماد تسجيل دخول المعلمين والوصول إلى النظام",
+                total_teachers: "إجمالي المعلمين",
+                active_logins: "تسجيلات الدخول النشطة",
+                no_access: "بدون وصول",
+                subjects_no_teacher: "مواد بدون معلم",
+                teacher_credential_mgmt: "إدارة بيانات اعتماد المعلمين",
+                print_btn: "طباعة",
+                search_teacher_label: "البحث عن معلم",
+                search_by_name: "البحث بالاسم...",
+                filter_by_spec: "تصفية حسب التخصص",
+                all_specializations: "جميع التخصصات",
+                all_statuses: "الكل",
+                has_login: "لديه تسجيل دخول",
+                no_login_option: "بدون تسجيل دخول",
+                filter_by_degree: "تصفية حسب الدرجة",
+                all_degrees: "جميع الدرجات",
+                th_id: "الرقم",
+                th_teacher_name: "اسم المعلم",
+                th_contact_email: "البريد الإلكتروني",
+                th_specialization: "التخصص",
+                th_degree: "الدرجة",
+                th_login_username: "اسم المستخدم",
+                th_status: "الحالة",
+                th_subjects: "المواد",
+                th_actions: "الإجراءات",
+                not_set: "غير محدد",
+                status_active: "نشط",
+                update_access: "تحديث الوصول",
+                create_access: "إنشاء وصول",
+                no_teachers_found: "لم يتم العثور على معلمين",
+                create_teacher_access: "إنشاء وصول المعلم",
+                modal_teacher_name: "اسم المعلم",
+                modal_login_username: "البريد الإلكتروني/اسم المستخدم *",
+                modal_username_placeholder: "teacher.email@school.edu",
+                modal_username_hint: "سيتم استخدامه لتسجيل الدخول",
+                modal_password: "كلمة المرور",
+                modal_password_placeholder: "أدخل كلمة المرور الجديدة",
+                modal_password_hint: "6 أحرف على الأقل. اتركه فارغاً للاحتفاظ بكلمة المرور الحالية.",
+                modal_cancel: "إلغاء",
+                modal_save: "حفظ البيانات",
+                chart_teachers_by_spec: "المعلمون حسب التخصص",
+                chart_teachers_by_degree: "المعلمون حسب الدرجة",
+                chart_teachers_by_subject: "المعلمون حسب المادة",
+                // Teacher Dashboard (Tasks)
+                academic_task_manager: "مدير المهام الأكاديمية",
+                welcome: "مرحباً",
+                manage_teaching_schedule: "إدارة جدول التدريس والمهام الأكاديمية",
+                subjects_teaching: "المواد التي تدرسها",
+                kpi_total_students: "إجمالي الطلاب",
+                upcoming_tasks: "المهام القادمة",
+                overdue_tasks: "المهام المتأخرة",
+                create_new_task: "إنشاء مهمة جديدة",
+                task_type: "نوع المهمة",
+                task_examination: "امتحان",
+                task_homework: "واجب منزلي",
+                task_reminder: "تذكير",
+                task_note: "ملاحظة عامة",
+                all_subjects: "جميع المواد",
+                task_title: "العنوان",
+                task_title_placeholder: "مثال: امتحان منتصف الفصل - الفصول 1-3",
+                task_description: "الوصف",
+                task_description_placeholder: "تفاصيل إضافية...",
+                task_due_date: "تاريخ الاستحقاق",
+                task_priority: "الأولوية",
+                priority_low: "منخفضة",
+                priority_medium: "متوسطة",
+                priority_high: "عالية",
+                create_task_btn: "إنشاء مهمة",
+                my_subjects: "موادي",
+                students_label: "طلاب",
+                view_marks: "عرض الدرجات",
+                no_subjects_assigned: "لم يتم تعيين مواد بعد",
                 // End Teacher Translations
                 marks_list: "📝 قائمة الدرجات",
                 search_filter_marks: "البحث وتصفية الدرجات",
@@ -12125,7 +13004,24 @@ if ($page == 'reports') {
                 thursday: "الخميس"
             },
             ku: {
+                // Login Page
+                page_title: "چوونەژوورەوە - سیستەمی بەڕێوەبردنی ئەکادیمی",
+                login_subtitle: "چوونەژوورەوە بۆ دەستگەیشتن بە داشبۆرد",
+                username: "ناوی بەکارهێنەر",
+                password: "وشەی نهێنی",
+                sign_in: "چوونەژوورەوە",
+                signing_in: "چوونەژوورەوە...",
+                access_levels: "ئاستەکانی دەستگەیشتن",
+                administrator: "بەڕێوەبەر",
+                full_system_control: "کۆنترۆڵی تەواوی سیستەم",
+                subject_management: "بەڕێوەبردنی وانەکان",
+                secure_portal: "دەروازەی ئەکادیمی پارێزراو",
+                error_invalid_credentials: "ناوی بەکارهێنەر یان وشەی نهێنی هەڵەیە",
+                error_empty_fields: "تکایە ناوی بەکارهێنەر و وشەی نهێنی بنووسە",
+                // Navigation
                 nav_reports: "داشبۆرد",
+                nav_dashboard: "داشبۆرد",
+                nav_access: "دەستگەیشتن",
                 nav_students: "قوتابییەکان",
                 nav_graduated: "دەرچووەکان",
                 nav_subjects: "وانەکان",
@@ -12240,16 +13136,22 @@ if ($page == 'reports') {
                 grade: "پلە",
                 filter_by_class: "پاڵاوتن بەپێی پۆل",
                 filter_by_subject: "پاڵاوتن بەپێی وانە",
+                filter_by_teacher: "پاڵاوتن بەپێی مامۆستا",
                 filter_by_grade: "پاڵاوتن بەپێی نمرە",
                 filter_by_gender: "پاڵاوتن بەپێی ڕەگەز",
                 filter_by_age_range: "پاڵاوتن بەپێی تەمەن",
                 filter_by_enrollment: "پاڵاوتن بەپێی تۆمارکردن",
                 all_classes: "هەموو پۆلەکان",
                 all_subjects: "هەموو وانەکان",
+                all_teachers: "هەموو مامۆستایان",
                 all_grades: "هەموو نمرەکان",
                 all_genders: "هەموو ڕەگەزەکان",
                 all_ages: "هەموو تەمەنەکان",
                 all_students: "هەموو قوتابییەکان",
+                sort_by_final_grade: "ڕیزکردن بەپێی نمرەی کۆتایی",
+                sort_default: "بنەڕەتی",
+                sort_grade_low_high: "نمرە: لە کەم بۆ زۆر",
+                sort_grade_high_low: "نمرە: لە زۆر بۆ کەم",
                 clear_filters: "🔄 پاڵاوتنەکان بسڕەوە",
                 collapse_all: "📁 هەموو داخستن",
                 search: "گەڕان",
@@ -12278,6 +13180,16 @@ if ($page == 'reports') {
                 teachers: "مامۆستایان",
                 specialization: "پسپۆڕی",
                 select_specialization: "پسپۆڕی هەڵبژێرە",
+                select_degree: "بڕوانامە هەڵبژێرە",
+                degree_high_school: "بڕوانامەی ئامادەیی",
+                degree_associate: "بڕوانامەی هاوبەش",
+                degree_bachelor: "بڕوانامەی بەکالۆریۆس",
+                degree_master: "بڕوانامەی ماستەر",
+                degree_doctorate: "دکتۆرا (PhD)",
+                degree_certificate: "بڕوانامەی پیشەیی",
+                no_subject_assignment: "دیاریکردنی وانە نییە",
+                select_subject_first: "یەکەم وانە هەڵبژێرە",
+                no_class_assignment: "دیاریکردنی پۆل نییە",
                 assigned_subjects: "وانە دیاریکراوەکان",
                 join_date: "بەرواری بەشداریکردن",
                 add_teacher: "مامۆستا زیادبکە",
@@ -12296,6 +13208,80 @@ if ($page == 'reports') {
                 active: "چالاک",
                 inactive: "ناچالاک",
                 all: "هەموو",
+                // Teacher Access Management
+                teacher_access_title: "بەڕێوەبردنی دەستگەیشتنی مامۆستایان",
+                teacher_access_subtitle: "بەڕێوەبردنی زانیاری چوونەژوورەوە و دەستگەیشتنی سیستەم بۆ مامۆستایان",
+                total_teachers: "کۆی گشتی مامۆستایان",
+                active_logins: "چوونەژوورەوە چالاکەکان",
+                no_access: "دەستگەیشتن نییە",
+                subjects_no_teacher: "وانەکان بەبێ مامۆستا",
+                teacher_credential_mgmt: "بەڕێوەبردنی زانیاری مامۆستایان",
+                print_btn: "چاپکردن",
+                search_teacher_label: "گەڕان بەدوای مامۆستا",
+                search_by_name: "گەڕان بە ناو...",
+                filter_by_spec: "پاڵاوتن بە پسپۆڕی",
+                all_specializations: "هەموو پسپۆڕیەکان",
+                all_statuses: "هەموو",
+                has_login: "چوونەژوورەوەی هەیە",
+                no_login_option: "چوونەژوورەوە نییە",
+                filter_by_degree: "پاڵاوتن بە بڕوانامە",
+                all_degrees: "هەموو بڕوانامەکان",
+                th_id: "ژمارە",
+                th_teacher_name: "ناوی مامۆستا",
+                th_contact_email: "ئیمەیڵ",
+                th_specialization: "پسپۆڕی",
+                th_degree: "بڕوانامە",
+                th_login_username: "ناوی بەکارهێنەر",
+                th_status: "بارودۆخ",
+                th_subjects: "وانەکان",
+                th_actions: "کردارەکان",
+                not_set: "دانەنراوە",
+                status_active: "چالاک",
+                update_access: "نوێکردنەوەی دەستگەیشتن",
+                create_access: "دروستکردنی دەستگەیشتن",
+                no_teachers_found: "هیچ مامۆستایەک نەدۆزرایەوە",
+                create_teacher_access: "دروستکردنی دەستگەیشتنی مامۆستا",
+                modal_teacher_name: "ناوی مامۆستا",
+                modal_login_username: "ئیمەیڵ/ناوی بەکارهێنەر *",
+                modal_username_placeholder: "teacher.email@school.edu",
+                modal_username_hint: "ئەمە بۆ چوونەژوورەوە بەکاردێت",
+                modal_password: "وشەی نهێنی",
+                modal_password_placeholder: "وشەی نهێنی نوێ بنووسە",
+                modal_password_hint: "لایەنی کەم 6 پیت. بەتاڵی بهێڵە بۆ پاراستنی وشەی نهێنی ئێستا.",
+                modal_cancel: "پاشگەزبوونەوە",
+                modal_save: "پاشەکەوتکردنی زانیاری",
+                chart_teachers_by_spec: "مامۆستایان بە پسپۆڕی",
+                chart_teachers_by_degree: "مامۆستایان بە بڕوانامە",
+                chart_teachers_by_subject: "مامۆستایان بە وانە",
+                // Teacher Dashboard (Tasks)
+                academic_task_manager: "بەڕێوەبەری ئەرکە ئەکادیمیەکان",
+                welcome: "بەخێربێیت",
+                manage_teaching_schedule: "بەڕێوەبردنی خشتەی وانەوتنەوە و ئەرکە ئەکادیمیەکان",
+                subjects_teaching: "وانە وتنەوەکان",
+                kpi_total_students: "کۆی گشتی قوتابیان",
+                upcoming_tasks: "ئەرکە داهاتووەکان",
+                overdue_tasks: "ئەرکە دواکەوتووەکان",
+                create_new_task: "دروستکردنی ئەرکی نوێ",
+                task_type: "جۆری ئەرک",
+                task_examination: "تاقیکردنەوە",
+                task_homework: "ئەرکی ماڵەوە",
+                task_reminder: "بیرخەرەوە",
+                task_note: "تێبینی گشتی",
+                all_subjects: "هەموو وانەکان",
+                task_title: "ناونیشان",
+                task_title_placeholder: "نموونە: تاقیکردنەوەی ناوەڕاست - بەشی 1-3",
+                task_description: "وەسف",
+                task_description_placeholder: "وردەکاری زیادە...",
+                task_due_date: "بەرواری کۆتایی",
+                task_priority: "پێشینە",
+                priority_low: "کەم",
+                priority_medium: "مامناوەند",
+                priority_high: "بەرز",
+                create_task_btn: "دروستکردنی ئەرک",
+                my_subjects: "وانەکانم",
+                students_label: "قوتابیان",
+                view_marks: "پیشاندانی نمرەکان",
+                no_subjects_assigned: "هێشتا هیچ وانەیەک دیاری نەکراوە",
                 add_mark: "نمرە زیادبکە",
                 student: "قوتابی",
                 subject: "وانە",
@@ -13549,10 +14535,10 @@ if ($page == 'reports') {
                     if (detailsRow) {
                         const assignmentRows = detailsRow.querySelectorAll('tbody tr');
                         for (let assignRow of assignmentRows) {
-                            const yearText = assignRow.cells[1] ? assignRow.cells[1].textContent : '';
+                            const assignYear = assignRow.getAttribute('data-year'); // Get year from data attribute
                             const classText = assignRow.cells[2] ? assignRow.cells[2].textContent : '';
                             
-                            if (!yearValue || yearText.includes('Year ' + yearValue)) {
+                            if (!yearValue || assignYear === yearValue) {
                                 matchesYear = true;
                             }
                             if (!classValue || classText.includes(classValue)) {
@@ -13772,14 +14758,39 @@ if ($page == 'reports') {
         
         // Generate login credentials for teacher
         // Teacher Access Management Functions
-        function openCredentialModal(teacherId, teacherName, currentUsername) {
+        function openCredentialModal(teacherId, teacherName, currentUsername, hasPassword, currentPassword) {
             document.getElementById('credential_teacher_id').value = teacherId;
             document.getElementById('credential_teacher_name').value = teacherName;
             document.getElementById('credential_username').value = currentUsername || '';
-            document.getElementById('credential_password').value = '';
+            
+            // Show current password if it exists
+            if (currentPassword && currentPassword.trim() !== '') {
+                document.getElementById('credential_password').value = currentPassword;
+                document.getElementById('credential_password').placeholder = 'Current: ' + currentPassword;
+            } else {
+                document.getElementById('credential_password').value = '';
+                document.getElementById('credential_password').placeholder = 'Enter new password';
+            }
             
             const modalTitle = currentUsername ? 'Update Teacher Access' : 'Create Teacher Access';
             document.getElementById('modalTitle').textContent = modalTitle;
+            
+            // Update password field based on whether password exists
+            const passwordField = document.getElementById('credential_password');
+            const passwordNote = document.getElementById('passwordNote');
+            const usernameField = document.getElementById('credential_username');
+            
+            if (hasPassword && currentUsername) {
+                passwordField.required = false;
+                passwordNote.textContent = '(Current password shown)';
+                passwordNote.style.color = '#10b981';
+                usernameField.required = true;
+            } else {
+                passwordField.required = true;
+                passwordNote.textContent = '(Required for new access)';
+                passwordNote.style.color = '#ef4444';
+                usernameField.required = true;
+            }
             
             document.getElementById('credentialModal').style.display = 'block';
         }

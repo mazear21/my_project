@@ -3,11 +3,7 @@ session_start();
 
 // If already logged in, redirect to appropriate dashboard
 if (isset($_SESSION['user_id'])) {
-    if ($_SESSION['user_type'] === 'admin') {
-        header('Location: index.php');
-    } else {
-        header('Location: teacher_dashboard.php');
-    }
+    header('Location: index.php');
     exit;
 }
 
@@ -103,7 +99,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         array($teacher['id'], $ip_address)
                     );
                     
-                    header('Location: teacher_dashboard.php');
+                    header('Location: index.php');
                     exit;
                 } else {
                     $error_message = 'Invalid username or password';
@@ -116,11 +112,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - School Management System</title>
+    <title data-translate="page_title">Login - Academic Management System</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         * {
             margin: 0;
@@ -130,28 +127,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #0a0e1a;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        /* Animated laser beams background */
+        body::before,
+        body::after {
+            content: '';
+            position: absolute;
+            width: 2px;
+            height: 100%;
+            background: linear-gradient(
+                to bottom,
+                transparent 0%,
+                rgba(59, 130, 246, 0.8) 10%,
+                rgba(59, 130, 246, 0.4) 50%,
+                transparent 100%
+            );
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.6),
+                        0 0 40px rgba(59, 130, 246, 0.3);
+            animation: beam-scan 8s ease-in-out infinite;
+            z-index: 0;
+        }
+        
+        body::before {
+            left: 20%;
+            animation-delay: 0s;
+        }
+        
+        body::after {
+            right: 20%;
+            animation-delay: 4s;
+        }
+        
+        @keyframes beam-scan {
+            0%, 100% {
+                opacity: 0.3;
+                transform: translateY(-10%) scaleY(0.95);
+            }
+            50% {
+                opacity: 1;
+                transform: translateY(10%) scaleY(1.05);
+            }
+        }
+        
+        /* Subtle grid overlay */
+        .grid-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(59, 130, 246, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(59, 130, 246, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            animation: grid-move 20s linear infinite;
+            z-index: 0;
+        }
+        
+        @keyframes grid-move {
+            0% { transform: translate(0, 0); }
+            100% { transform: translate(50px, 50px); }
         }
         
         .login-container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 50px;
-            width: 100%;
-            max-width: 450px;
-            animation: slideUp 0.5s ease-out;
+            position: relative;
+            width: 420px;
+            padding: 50px 45px;
+            background: rgba(15, 23, 42, 0.95);
+            box-sizing: border-box;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            animation: slideUp 0.6s ease-out;
+            z-index: 1;
         }
         
         @keyframes slideUp {
             from {
                 opacity: 0;
-                transform: translateY(30px);
+                transform: translateY(40px);
             }
             to {
                 opacity: 1;
@@ -161,223 +225,387 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         .login-header {
             text-align: center;
-            margin-bottom: 40px;
+            margin-bottom: 35px;
         }
         
         .login-header h1 {
-            color: #333;
-            font-size: 28px;
-            margin-bottom: 10px;
+            color: #ffffff;
+            font-size: 26px;
+            margin-bottom: 8px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
         }
         
         .login-header p {
-            color: #666;
+            color: #94a3b8;
             font-size: 14px;
+            font-weight: 400;
         }
         
         .logo {
-            width: 80px;
-            height: 80px;
+            width: 70px;
+            height: 70px;
             margin: 0 auto 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #3b82f6 0%, #1e40af 100%);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 40px;
+            font-size: 32px;
             color: white;
+            box-shadow: 0 8px 20px rgba(59, 130, 246, 0.4);
         }
         
         .form-group {
-            margin-bottom: 25px;
+            position: relative;
+            margin-bottom: 35px;
         }
         
         .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            color: #333;
-            font-weight: 500;
-            font-size: 14px;
+            position: absolute;
+            top: -20px;
+            left: 0;
+            padding: 0;
+            font-size: 13px;
+            color: #94a3b8;
+            pointer-events: none;
+            font-weight: 600;
         }
         
         .form-group input {
             width: 100%;
-            padding: 14px 16px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 15px;
-            transition: all 0.3s ease;
+            padding: 12px 0;
+            font-size: 16px;
+            color: #ffffff;
+            border: none;
+            border-bottom: 2px solid #475569;
+            outline: none;
+            background: transparent;
+            transition: border-bottom-color 0.3s ease;
             font-family: inherit;
         }
         
         .form-group input:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            border-bottom-color: #3b82f6;
+        }
+        
+        .form-group input:focus ~ label {
+            color: #3b82f6;
         }
         
         .error-message {
-            background: #fee;
-            color: #c33;
-            padding: 12px 16px;
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+            padding: 14px 16px;
             border-radius: 8px;
-            margin-bottom: 20px;
+            margin-bottom: 25px;
             font-size: 14px;
-            border-left: 4px solid #c33;
+            border-left: 4px solid #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            animation: shake 0.4s ease;
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-10px); }
+            75% { transform: translateX(10px); }
         }
         
         .login-btn {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 16px;
+            padding: 16px 30px;
+            color: #ffffff;
+            font-size: 17px;
             font-weight: 600;
-            cursor: pointer;
+            text-decoration: none;
+            text-transform: uppercase;
             transition: all 0.3s ease;
-            margin-top: 10px;
+            margin-top: 30px;
+            letter-spacing: 1px;
+            border: none;
+            cursor: pointer;
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            border-radius: 8px;
+            min-height: 56px;
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
         }
         
         .login-btn:hover {
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
             transform: translateY(-2px);
-            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
         }
         
         .login-btn:active {
             transform: translateY(0);
+            box-shadow: 0 2px 10px rgba(59, 130, 246, 0.3);
+        }
+        
+        .login-btn span {
+            position: relative;
+            z-index: 1;
+        }
+        
+        .login-btn span:not([data-translate]) {
+            display: none;
         }
         
         .info-section {
-            margin-top: 30px;
+            margin-top: 35px;
             padding-top: 25px;
-            border-top: 1px solid #e0e0e0;
+            border-top: 1px solid rgba(148, 163, 184, 0.2);
         }
         
         .info-section h3 {
-            color: #333;
-            font-size: 14px;
+            color: #cbd5e1;
+            font-size: 13px;
             margin-bottom: 15px;
             font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
         
         .user-types {
             display: flex;
-            gap: 10px;
+            gap: 12px;
         }
         
         .user-type-badge {
             flex: 1;
-            padding: 12px;
-            background: #f8f9fa;
+            padding: 14px;
+            background: rgba(30, 41, 59, 0.6);
             border-radius: 8px;
             text-align: center;
             font-size: 13px;
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            transition: all 0.3s ease;
+        }
+        
+        .user-type-badge:hover {
+            background: rgba(59, 130, 246, 0.15);
+            border-color: rgba(59, 130, 246, 0.4);
+            transform: translateY(-2px);
         }
         
         .user-type-badge strong {
             display: block;
-            color: #667eea;
-            margin-bottom: 4px;
+            color: #3b82f6;
+            margin-bottom: 6px;
+            font-size: 14px;
         }
         
         .user-type-badge span {
-            color: #666;
+            color: #94a3b8;
             font-size: 11px;
-        }
-        
-        .password-toggle {
-            position: relative;
-        }
-        
-        .password-toggle input {
-            padding-right: 45px;
         }
         
         .toggle-password {
             position: absolute;
-            right: 12px;
-            top: 50%;
-            transform: translateY(-50%);
+            right: 0;
+            top: 8px;
             background: none;
             border: none;
             cursor: pointer;
-            color: #666;
+            color: #64748b;
             font-size: 18px;
             padding: 5px;
+            transition: color 0.3s ease;
+        }
+        
+        .toggle-password:hover {
+            color: #3b82f6;
+        }
+        
+        .footer-text {
+            text-align: center;
+            margin-top: 25px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(148, 163, 184, 0.15);
+            color: #64748b;
+            font-size: 12px;
         }
     </style>
 </head>
 <body>
+    <!-- Language Selector -->
+    <div style="position: fixed; top: 20px; right: 20px; z-index: 1000;">
+        <select id="languageSelect" onchange="changeLanguage(this.value)" style="padding: 8px 15px; background: rgba(15, 23, 42, 0.95); color: #ffffff; border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 8px; cursor: pointer; font-size: 14px; backdrop-filter: blur(10px);">
+            <option value="en">English</option>
+            <option value="ar">العربية</option>
+            <option value="ku">کوردی</option>
+        </select>
+    </div>
+
     <div class="login-container">
         <div class="login-header">
-            <div class="logo">🎓</div>
-            <h1>School Management System</h1>
-            <p>Sign in to continue</p>
+            <div class="logo"><i class="fas fa-graduation-cap"></i></div>
+            <h1 data-translate="system_title">Academic Management System</h1>
+            <p data-translate="login_subtitle">Sign in to access your dashboard</p>
         </div>
         
         <?php if ($error_message): ?>
             <div class="error-message">
-                <?= htmlspecialchars($error_message) ?>
+                <i class="fas fa-exclamation-circle"></i> <span data-translate="error_invalid_credentials"><?= htmlspecialchars($error_message) ?></span>
             </div>
         <?php endif; ?>
         
         <form method="POST" action="">
             <div class="form-group">
-                <label for="username">Username</label>
                 <input 
                     type="text" 
                     id="username" 
                     name="username" 
-                    placeholder="Enter your username"
                     value="<?= isset($_POST['username']) ? htmlspecialchars($_POST['username']) : '' ?>"
                     required
                     autofocus
                 >
+                <label for="username" data-translate="username">Username</label>
             </div>
             
-            <div class="form-group password-toggle">
-                <label for="password">Password</label>
+            <div class="form-group">
                 <input 
                     type="password" 
                     id="password" 
                     name="password" 
-                    placeholder="Enter your password"
                     required
                 >
-                <button type="button" class="toggle-password" onclick="togglePassword()">👁️</button>
+                <label for="password" data-translate="password">Password</label>
+                <button type="button" class="toggle-password" onclick="togglePassword()" tabindex="-1">
+                    <i class="fas fa-eye" id="eye-icon"></i>
+                </button>
             </div>
             
-            <button type="submit" class="login-btn">Sign In</button>
+            <button type="submit" class="login-btn">
+                <span></span>
+                <span></span>
+                <span></span>
+                <span></span>
+                <span data-translate="sign_in">Sign In</span>
+            </button>
         </form>
         
         <div class="info-section">
-            <h3>User Types:</h3>
+            <h3 data-translate="access_levels">Access Levels</h3>
             <div class="user-types">
                 <div class="user-type-badge">
-                    <strong>Admin</strong>
-                    <span>Full System Access</span>
+                    <strong><i class="fas fa-user-shield"></i> <span data-translate="administrator">Administrator</span></strong>
+                    <span data-translate="full_system_control">Full System Control</span>
                 </div>
                 <div class="user-type-badge">
-                    <strong>Teacher</strong>
-                    <span>Assigned Subjects Only</span>
+                    <strong><i class="fas fa-chalkboard-teacher"></i> <span data-translate="teacher">Teacher</span></strong>
+                    <span data-translate="subject_management">Subject Management</span>
                 </div>
             </div>
+        </div>
+        
+        <div class="footer-text">
+            <i class="fas fa-lock"></i> <span data-translate="secure_portal">Secure Academic Portal</span> &copy; <?= date('Y') ?>
         </div>
     </div>
     
     <script>
+        // Translation system
+        const translations = {
+            en: {
+                page_title: "Login - Academic Management System",
+                system_title: "Academic Management System",
+                login_subtitle: "Sign in to access your dashboard",
+                username: "Username",
+                password: "Password",
+                sign_in: "Sign In",
+                signing_in: "Signing In...",
+                access_levels: "Access Levels",
+                administrator: "Administrator",
+                full_system_control: "Full System Control",
+                teacher: "Teacher",
+                subject_management: "Subject Management",
+                secure_portal: "Secure Academic Portal",
+                error_invalid_credentials: "Invalid username or password",
+                error_empty_fields: "Please enter both username and password"
+            },
+            ar: {
+                page_title: "تسجيل الدخول - نظام الإدارة الأكاديمية",
+                system_title: "نظام الإدارة الأكاديمية",
+                login_subtitle: "قم بتسجيل الدخول للوصول إلى لوحة التحكم",
+                username: "اسم المستخدم",
+                password: "كلمة المرور",
+                sign_in: "تسجيل الدخول",
+                signing_in: "جاري تسجيل الدخول...",
+                access_levels: "مستويات الوصول",
+                administrator: "المسؤول",
+                full_system_control: "التحكم الكامل بالنظام",
+                teacher: "المعلم",
+                subject_management: "إدارة المواد",
+                secure_portal: "بوابة أكاديمية آمنة",
+                error_invalid_credentials: "اسم المستخدم أو كلمة المرور غير صحيحة",
+                error_empty_fields: "الرجاء إدخال اسم المستخدم وكلمة المرور"
+            },
+            ku: {
+                page_title: "چوونەژوورەوە - سیستەمی بەڕێوەبردنی ئەکادیمی",
+                system_title: "سیستەمی بەڕێوەبردنی ئەکادیمی",
+                login_subtitle: "چوونەژوورەوە بۆ دەستگەیشتن بە داشبۆرد",
+                username: "ناوی بەکارهێنەر",
+                password: "وشەی نهێنی",
+                sign_in: "چوونەژوورەوە",
+                signing_in: "چوونەژوورەوە...",
+                access_levels: "ئاستەکانی دەستگەیشتن",
+                administrator: "بەڕێوەبەر",
+                full_system_control: "کۆنترۆڵی تەواوی سیستەم",
+                teacher: "مامۆستا",
+                subject_management: "بەڕێوەبردنی وانەکان",
+                secure_portal: "دەروازەی ئەکادیمی پارێزراو",
+                error_invalid_credentials: "ناوی بەکارهێنەر یان وشەی نهێنی هەڵەیە",
+                error_empty_fields: "تکایە ناوی بەکارهێنەر و وشەی نهێنی بنووسە"
+            }
+        };
+
+        let currentLang = localStorage.getItem('language') || 'en';
+
+        function changeLanguage(lang) {
+            currentLang = lang;
+            localStorage.setItem('language', lang);
+            
+            // Update HTML attributes
+            document.documentElement.lang = lang;
+            document.documentElement.dir = 'ltr';
+            
+            // Update all translatable elements
+            document.querySelectorAll('[data-translate]').forEach(element => {
+                const key = element.getAttribute('data-translate');
+                if (translations[lang] && translations[lang][key]) {
+                    if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA') {
+                        element.placeholder = translations[lang][key];
+                    } else if (element.tagName === 'TITLE') {
+                        element.textContent = translations[lang][key];
+                    } else {
+                        element.textContent = translations[lang][key];
+                    }
+                }
+            });
+            
+            // Update language selector
+            document.getElementById('languageSelect').value = lang;
+        }
+
+        // Initialize language on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            changeLanguage(currentLang);
+        });
+
         function togglePassword() {
             const passwordInput = document.getElementById('password');
-            const toggleBtn = document.querySelector('.toggle-password');
+            const eyeIcon = document.getElementById('eye-icon');
             
             if (passwordInput.type === 'password') {
                 passwordInput.type = 'text';
-                toggleBtn.textContent = '👁️‍🗨️';
+                eyeIcon.className = 'fas fa-eye-slash';
             } else {
                 passwordInput.type = 'password';
-                toggleBtn.textContent = '👁️';
+                eyeIcon.className = 'fas fa-eye';
             }
         }
         
@@ -385,11 +613,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         const errorMsg = document.querySelector('.error-message');
         if (errorMsg) {
             setTimeout(() => {
-                errorMsg.style.transition = 'opacity 0.5s';
+                errorMsg.style.transition = 'opacity 0.5s, transform 0.5s';
                 errorMsg.style.opacity = '0';
+                errorMsg.style.transform = 'translateY(-10px)';
                 setTimeout(() => errorMsg.remove(), 500);
             }, 5000);
         }
+        
+        // Add loading state to button on submit
+        document.querySelector('form').addEventListener('submit', function() {
+            const btn = document.querySelector('.login-btn');
+            const signInText = btn.querySelector('[data-translate="sign_in"]');
+            if (signInText) {
+                signInText.textContent = translations[currentLang].signing_in;
+            }
+            btn.disabled = true;
+        });
     </script>
 </body>
 </html>
