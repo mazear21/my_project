@@ -25,7 +25,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($admin_result && pg_num_rows($admin_result) > 0) {
             $admin = pg_fetch_assoc($admin_result);
             
+            $password_valid = false;
+            $needs_hashing = false;
+            
+            // First try bcrypt verification (normal case)
             if (password_verify($password, $admin['password'])) {
+                $password_valid = true;
+            } 
+            // If bcrypt fails, check if it's a plain text password (for pgAdmin additions)
+            else if ($password === $admin['password']) {
+                $password_valid = true;
+                $needs_hashing = true;
+            }
+            
+            if ($password_valid) {
+                // If password needs hashing, update it now
+                if ($needs_hashing) {
+                    $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                    pg_query_params($conn, 
+                        "UPDATE admin_users SET password = $1 WHERE id = $2", 
+                        array($hashed_password, $admin['id'])
+                    );
+                }
+                
                 // Admin login successful
                 $_SESSION['user_id'] = $admin['id'];
                 $_SESSION['user_type'] = 'admin';
@@ -68,7 +90,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($teacher_result && pg_num_rows($teacher_result) > 0) {
                 $teacher = pg_fetch_assoc($teacher_result);
                 
+                $password_valid = false;
+                $needs_hashing = false;
+                
+                // First try bcrypt verification (normal case)
                 if (password_verify($password, $teacher['password'])) {
+                    $password_valid = true;
+                } 
+                // If bcrypt fails, check if it's a plain text password (for pgAdmin additions)
+                else if ($password === $teacher['password']) {
+                    $password_valid = true;
+                    $needs_hashing = true;
+                }
+                
+                if ($password_valid) {
+                    // If password needs hashing, update it now
+                    if ($needs_hashing) {
+                        $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                        pg_query_params($conn, 
+                            "UPDATE teachers SET password = $1 WHERE id = $2", 
+                            array($hashed_password, $teacher['id'])
+                        );
+                    }
+                    
                     // Teacher login successful
                     $_SESSION['user_id'] = $teacher['id'];
                     $_SESSION['user_type'] = 'teacher';
@@ -243,8 +287,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         
         .logo {
-            width: 70px;
-            height: 70px;
+            width: 100px;
+            height: 100px;
             margin: 0 auto 20px;
             background: linear-gradient(135deg, #3b82f6 0%, #1e40af 100%);
             border-radius: 50%;
@@ -442,7 +486,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <div class="login-container">
         <div class="login-header">
-            <div class="logo"><i class="fas fa-graduation-cap"></i></div>
+            <div class="logo" style="overflow: hidden;">
+                <img src="photo_2025-11-12_21-42-15.jpg" alt="Logo" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;">
+            </div>
             <h1 data-translate="system_title">Academic Management System</h1>
             <p data-translate="login_subtitle">Sign in to access your dashboard</p>
         </div>

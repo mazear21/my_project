@@ -22,7 +22,13 @@ if (pg_num_rows($column_exists) == 0) {
 
 // Handle AJAX requests
 if (isset($_POST['action'])) {
-    header('Content-Type: application/json');
+    // Only set JSON header for specific actions that return JSON
+    $json_actions = ['update_mark', 'promote_student', 'graduate_student', 'update_teacher', 'delete_teacher', 
+                     'generate_teacher_credentials', 'remove_teacher_assignment', 'assign_subject_to_teacher'];
+    
+    if (in_array($_POST['action'], $json_actions)) {
+        header('Content-Type: application/json');
+    }
     
     if ($_POST['action'] === 'update_mark') {
         // PERMISSION CHECK: Only teachers can edit marks, not admins
@@ -369,10 +375,17 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_student') {
     }
     
     if (!empty($name) && !empty($class_level) && !empty($gender) && $age > 0 && !empty($year)) {
-        // Insert student record - assuming we'll add a year column to the database
-        $query = "INSERT INTO students (name, age, gender, class_level, year, email, phone, academic_year, graduation_status, join_date) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id";
-        $current_date = date('Y-m-d');
-        $result = pg_query_params($conn, $query, array($name, $age, $gender, $class_level, $year, $email, $phone, 1, 'Active', $current_date));
+        // Insert student record
+        $query = "INSERT INTO students (name, age, gender, class_level, year, phone) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id";
+        $result = pg_query_params($conn, $query, array($name, $age, $gender, $class_level, $year, $phone));
+        
+        if (!$result) {
+            $error = pg_last_error($conn);
+            error_log("Database error in add_student: " . $error);
+            ob_end_clean();
+            echo "Error adding student: " . $error;
+            exit;
+        }
         
         if ($result) {
             $row = pg_fetch_assoc($result);
@@ -393,13 +406,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_student') {
                 $success_msg .= " Enrolled in $success_count subject(s).";
             }
             
-            header("Location: ?page=students&success=" . urlencode($success_msg));
+            ob_end_clean();
+            echo $success_msg;
             exit;
         } else {
-            $error_message = "Error adding student: " . pg_last_error($conn);
+            ob_end_clean();
+            echo "Error adding student: " . pg_last_error($conn);
+            exit;
         }
     } else {
-        $error_message = "Name, age, gender, and class level are required.";
+        ob_end_clean();
+        echo "Error: Name, age, gender, and class level are required.";
+        exit;
     }
 }
 
@@ -420,13 +438,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_subject') {
         $result = pg_query_params($conn, $query, array($subject_name, $description, $credits, $year));
         
         if ($result) {
-            header("Location: ?page=subjects&success=" . urlencode("Subject added successfully!"));
+            ob_end_clean();
+            echo "Subject added successfully!";
             exit;
         } else {
-            $error_message = "Error adding subject: " . pg_last_error($conn);
+            ob_end_clean();
+            echo "Error adding subject: " . pg_last_error($conn);
+            exit;
         }
     } else {
-        $error_message = "Subject name and credits are required.";
+        ob_end_clean();
+        echo "Error: Subject name and credits are required.";
+        exit;
     }
 }
 
@@ -737,6 +760,46 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_teacher' && isset($_GET['
     exit;
 }
 
+// AJAX handler to get teacher subjects
+if (isset($_GET['action']) && $_GET['action'] === 'get_teacher_subjects' && isset($_GET['teacher_id'])) {
+    header('Content-Type: application/json');
+    $teacher_id = (int)$_GET['teacher_id'];
+    
+    if ($teacher_id > 0) {
+        // Get teacher info
+        $teacher_query = "SELECT id, name, email FROM teachers WHERE id = $1";
+        $teacher_result = pg_query_params($conn, $teacher_query, array($teacher_id));
+        
+        if ($teacher_result && pg_num_rows($teacher_result) > 0) {
+            $teacher = pg_fetch_assoc($teacher_result);
+            
+            // Get teacher assignments
+            $assignments_query = "SELECT ts.*, s.subject_name, s.year,
+                                        COUNT(DISTINCT m.student_id) as student_count,
+                                        TO_CHAR(ts.assigned_date, 'Mon DD, YYYY') as assigned_date
+                                 FROM teacher_subjects ts
+                                 JOIN subjects s ON ts.subject_id = s.id
+                                 LEFT JOIN marks m ON s.id = m.subject_id
+                                 WHERE ts.teacher_id = $1
+                                 GROUP BY ts.id, s.subject_name, s.year, ts.year, ts.class_level, ts.assigned_date
+                                 ORDER BY ts.year, ts.class_level, s.subject_name";
+            $assignments_result = pg_query_params($conn, $assignments_query, array($teacher_id));
+            
+            $assignments = [];
+            if ($assignments_result) {
+                $assignments = pg_fetch_all($assignments_result) ?: [];
+            }
+            
+            echo json_encode(['success' => true, 'teacher' => $teacher, 'assignments' => $assignments]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Teacher not found']);
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Invalid teacher ID']);
+    }
+    exit;
+}
+
 // AJAX handler to get available subjects for teacher assignment
 if (isset($_GET['action']) && $_GET['action'] === 'get_available_subjects') {
     header('Content-Type: application/json');
@@ -830,8 +893,16 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_student') {
     
     if (!empty($name) && !empty($class_level) && !empty($gender) && $age > 0 && !empty($year)) {
         // Update student record
-        $query = "UPDATE students SET name = $1, age = $2, gender = $3, class_level = $4, year = $5, email = $6, phone = $7 WHERE id = $8";
-        $result = pg_query_params($conn, $query, array($name, $age, $gender, $class_level, $year, $email, $phone, $student_id));
+        $query = "UPDATE students SET name = $1, age = $2, gender = $3, class_level = $4, year = $5, phone = $6 WHERE id = $7";
+        $result = pg_query_params($conn, $query, array($name, $age, $gender, $class_level, $year, $phone, $student_id));
+        
+        if (!$result) {
+            $error = pg_last_error($conn);
+            error_log("Database error in update_student: " . $error);
+            ob_end_clean();
+            echo "Error updating student: " . $error;
+            exit;
+        }
         
         if ($result) {
             // Handle subject enrollment changes
@@ -870,13 +941,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_student') {
                 $success_msg .= " Subject enrollments updated: " . count($subjects_to_add) . " added, " . count($subjects_to_remove) . " removed.";
             }
             
-            header("Location: ?page=students&success=" . urlencode($success_msg));
+            ob_end_clean();
+            echo $success_msg;
             exit;
         } else {
-            $error_message = "Error updating student: " . pg_last_error($conn);
+            ob_end_clean();
+            echo "Error updating student: " . pg_last_error($conn);
+            exit;
         }
     } else {
-        $error_message = "Name, age, gender, and class level are required.";
+        ob_end_clean();
+        echo "Error: Name, age, gender, and class level are required.";
+        exit;
     }
 }
 
@@ -901,13 +977,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_student') {
         if ($result) {
             // Resequence IDs after deletion
             resequenceTable($conn, 'students');
-            header("Location: ?page=students&success=" . urlencode("Student deleted successfully!"));
+            ob_end_clean();
+            echo "Student deleted successfully!";
             exit;
         } else {
-            $error_message = "Error deleting student: " . pg_last_error($conn);
+            ob_end_clean();
+            echo "Error deleting student: " . pg_last_error($conn);
+            exit;
         }
     } else {
-        $error_message = "Invalid student ID.";
+        ob_end_clean();
+        echo "Error: Invalid student ID.";
+        exit;
     }
 }
 
@@ -944,13 +1025,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_subject') {
         $result = pg_query_params($conn, $query, array($subject_name, $description, $credits, $year, $subject_id));
         
         if ($result) {
-            header("Location: ?page=subjects&success=" . urlencode("Subject updated successfully!"));
+            ob_end_clean();
+            echo "Subject updated successfully!";
             exit;
         } else {
-            $error_message = "Error updating subject: " . pg_last_error($conn);
+            ob_end_clean();
+            echo "Error updating subject: " . pg_last_error($conn);
+            exit;
         }
     } else {
-        $error_message = "Subject name, credits, and academic year are required.";
+        ob_end_clean();
+        echo "Error: Subject name, credits, and academic year are required.";
+        exit;
     }
 }
 
@@ -975,13 +1061,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_subject') {
         if ($result) {
             // Resequence IDs after deletion
             resequenceTable($conn, 'subjects');
-            header("Location: ?page=subjects&success=" . urlencode("Subject deleted successfully!"));
+            ob_end_clean();
+            echo "Subject deleted successfully!";
             exit;
         } else {
-            $error_message = "Error deleting subject: " . pg_last_error($conn);
+            ob_end_clean();
+            echo "Error deleting subject: " . pg_last_error($conn);
+            exit;
         }
     } else {
-        $error_message = "Invalid subject ID.";
+        ob_end_clean();
+        echo "Error: Invalid subject ID.";
+        exit;
     }
 }
 
@@ -1303,11 +1394,11 @@ if (isset($_POST['action']) && $_POST['action'] === 'graduate_student') {
             $graduation_grade = $graduation_data['graduation_grade'];
             
             // Insert into graduated_students table with graduation grade
-            $graduate_query = "INSERT INTO graduated_students (student_id, student_name, age, gender, class_level, email, phone, graduation_date, final_year, graduation_grade) 
-                              VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, 2, $8)";
+            $graduate_query = "INSERT INTO graduated_students (student_id, student_name, age, gender, class_level, phone, graduation_date, final_year, graduation_grade) 
+                              VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE, 2, $7)";
             $graduate_result = pg_query_params($conn, $graduate_query, array(
                 $student['id'], $student['name'], $student['age'], $student['gender'], 
-                $student['class_level'], $student['email'], $student['phone'], $graduation_grade
+                $student['class_level'], $student['phone'], $graduation_grade
             ));
             
             if ($graduate_result) {
@@ -2584,7 +2675,8 @@ if ($page == 'reports') {
             min-height: 100vh;
             color: var(--text-color);
             line-height: 1.6;
-            overflow-x: hidden;
+            overflow-x: hidden; /* Prevent horizontal page scroll */
+            max-width: 100vw; /* Constrain to viewport width */
         }
 
         /* ===== NAVIGATION - MATCHING IMAGE STYLE ===== */
@@ -3851,18 +3943,31 @@ if ($page == 'reports') {
 
         .table-container {
             overflow-x: auto;
+            overflow-y: visible;
             border-radius: 8px;
             border: 1px solid var(--border-color);
+            margin: 0;
+            max-width: 100%;
+            -webkit-overflow-scrolling: touch;
+            position: relative;
+            background: white;
+        }
+        
+        /* Prevent page horizontal scroll */
+        .data-table-section {
+            overflow-x: hidden;
+            max-width: 100%;
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
             font-size: 0.9rem;
+            table-layout: auto;
         }
 
         th, td {
-            padding: 1rem;
+            padding: 0.75rem 1rem;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
         }
@@ -3874,6 +3979,34 @@ if ($page == 'reports') {
             font-size: 0.85rem;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        /* Action buttons alignment */
+        #studentsTable td:nth-child(10) {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: stretch;
+        }
+        
+        #studentsTable td:nth-child(10) button {
+            width: 100%;
+            margin: 0 !important;
+        }
+        
+        #teachersTable td:last-child {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            align-items: stretch;
+        }
+        
+        #teachersTable td:last-child button {
+            width: 100%;
+            margin: 0 !important;
         }
 
         /* Teachers Table Specific Styling */
@@ -3932,6 +4065,8 @@ if ($page == 'reports') {
             background: #f0f7ff !important;
             border-left-color: var(--primary-color) !important;
         }
+        
+
 
         .student-name-cell {
             font-weight: 600;
@@ -3975,7 +4110,11 @@ if ($page == 'reports') {
         }
 
         .subject-details-container {
-            padding: 1rem 1.5rem;
+            padding: 1rem;
+            background: white;
+            border-top: 3px solid #667eea;
+            max-width: 100%;
+            overflow-x: hidden;
         }
 
         .subject-title {
@@ -3991,24 +4130,33 @@ if ($page == 'reports') {
             width: 100%;
             border-collapse: collapse;
             background: white;
-            border-radius: 6px;
-            overflow: hidden;
+            table-layout: auto;
+            word-wrap: break-word;
         }
 
         .subject-marks-table th {
-            background: #e0f2fe;
-            color: #0c4a6e;
-            padding: 0.6rem;
-            font-size: 0.8rem;
-            text-align: center;
+            background: #f1f5f9;
+            color: #1e293b;
+            padding: 0.4rem 0.6rem;
+            font-size: 0.75rem;
+            text-align: left;
             font-weight: 600;
+            white-space: normal;
+            border-bottom: 2px solid #e2e8f0;
         }
 
         .subject-marks-table td {
-            padding: 0.7rem;
+            padding: 0.4rem 0.6rem;
+            text-align: left;
+            border-bottom: 1px solid #f1f5f9;
+            font-size: 0.8rem;
+            white-space: normal;
+            word-wrap: break-word;
+        }
+
+        .subject-marks-table td:nth-child(4),
+        .subject-marks-table td:nth-child(6) {
             text-align: center;
-            border-bottom: 1px solid #e2e8f0;
-            font-size: 0.85rem;
         }
 
         .subject-marks-table tr:last-child td {
@@ -4264,7 +4412,9 @@ if ($page == 'reports') {
     <nav>
         <div class="nav-container">
             <div class="nav-brand">
-                <div class="brand-icon"><i class="fas fa-graduation-cap"></i></div>
+                <div class="brand-icon" style="overflow: hidden;">
+                    <img src="photo_2025-11-12_21-42-15.jpg" alt="Logo" style="width: 65px; height: 65px; object-fit: cover; border-radius: 8px;">
+                </div>
                 <div class="brand-text">
                     <span class="brand-title" data-translate="system_title">Student Management</span>
                     <span class="brand-subtitle" data-translate="system_subtitle">Academic Portal</span>
@@ -4356,24 +4506,29 @@ if ($page == 'reports') {
             ";
             $tasks_result = pg_query_params($conn, $tasks_query, [$teacher_id]);
             
-            // Get student count for this teacher
+            // Get UNIQUE student count for this teacher (students enrolled in teacher's assigned subjects for their specific years)
             $student_count = pg_query_params($conn, "
                 SELECT COUNT(DISTINCT m.student_id) as count
                 FROM marks m
-                INNER JOIN teacher_subjects ts ON m.subject_id = ts.subject_id
-                WHERE ts.teacher_id = $1
+                INNER JOIN subjects s ON m.subject_id = s.id
+                INNER JOIN teacher_subjects ts ON s.id = ts.subject_id AND s.year = ts.year
+                INNER JOIN students st ON m.student_id = st.id AND st.year = ts.year
+                WHERE ts.teacher_id = $1 AND st.status = 'active'
             ", [$teacher_id]);
             $total_students = pg_fetch_result($student_count, 0, 0);
             
-            // Get upcoming tasks count
-            $upcoming_tasks = pg_query_params($conn, "
-                SELECT COUNT(*) as count
-                FROM teacher_tasks
-                WHERE teacher_id = $1 
-                AND status = 'pending' 
-                AND due_date >= CURRENT_DATE
+            // Get UNIQUE students with incomplete marks (any mark component is 0)
+            $incomplete_marks = pg_query_params($conn, "
+                SELECT COUNT(DISTINCT m.student_id) as count
+                FROM marks m
+                INNER JOIN subjects s ON m.subject_id = s.id
+                INNER JOIN teacher_subjects ts ON s.id = ts.subject_id AND s.year = ts.year
+                INNER JOIN students st ON m.student_id = st.id AND st.year = ts.year
+                WHERE ts.teacher_id = $1 
+                AND st.status = 'active'
+                AND (m.final_exam = 0 OR m.midterm_exam = 0 OR m.quizzes = 0 OR m.daily_activities = 0)
             ", [$teacher_id]);
-            $upcoming_count = pg_fetch_result($upcoming_tasks, 0, 0);
+            $incomplete_count = pg_fetch_result($incomplete_marks, 0, 0);
             
             // Get overdue tasks count
             $overdue_tasks = pg_query_params($conn, "
@@ -4417,8 +4572,8 @@ if ($page == 'reports') {
                             <div class="blob"></div>
                             <div class="bg"></div>
                             <div class="kpi-content">
-                                <div class="kpi-value"><?= $upcoming_count ?></div>
-                                <div class="kpi-label" data-translate="upcoming_tasks">Upcoming Tasks</div>
+                                <div class="kpi-value"><?= $incomplete_count ?></div>
+                                <div class="kpi-label" data-translate="students_pending_marks">Students Pending Marks</div>
                             </div>
                         </div>
                         
@@ -4503,11 +4658,21 @@ if ($page == 'reports') {
                                 pg_result_seek($teacher_subjects, 0); // Reset pointer
                                 if (pg_num_rows($teacher_subjects) > 0):
                                     while ($subj = pg_fetch_assoc($teacher_subjects)):
+                                        // Get the teacher's assignment details to match year
+                                        $assignment = pg_query_params($conn, "
+                                            SELECT year FROM teacher_subjects 
+                                            WHERE teacher_id = $1 AND subject_id = $2
+                                        ", [$teacher_id, $subj['id']]);
+                                        $assigned_year = pg_fetch_result($assignment, 0, 0);
+                                        
                                         $student_count_subj = pg_query_params($conn, "
-                                            SELECT COUNT(DISTINCT student_id) as count
-                                            FROM marks
-                                            WHERE subject_id = $1
-                                        ", [$subj['id']]);
+                                            SELECT COUNT(DISTINCT m.student_id) as count
+                                            FROM marks m
+                                            JOIN students st ON m.student_id = st.id
+                                            WHERE m.subject_id = $1 
+                                            AND st.status = 'active'
+                                            AND st.year = $2
+                                        ", [$subj['id'], $assigned_year]);
                                         $subj_students = pg_fetch_result($student_count_subj, 0, 0);
                                 ?>
                                     <div style="background: #f8fafc; border-left: 4px solid var(--primary-color); padding: 15px; margin-bottom: 12px; border-radius: 6px;">
@@ -4825,7 +4990,7 @@ if ($page == 'reports') {
                             <!-- Performance Distribution Chart -->
                             <div class="chart-card" data-aos="fade-up">
                                 <div class="chart-header">
-                                    <h3 class="chart-title">📊 Grade Distribution</h3>
+                                    <h3 class="chart-title"><i class="fas fa-chart-bar"></i> Grade Distribution</h3>
                                     <div class="chart-actions">
                                         <div class="chart-year-filter">
                                             <select id="gradeDistributionYearFilter" class="year-filter-select" onchange="updateGradeDistributionChart(this.value)">
@@ -4860,7 +5025,7 @@ if ($page == 'reports') {
                             <div class="chart-card" data-aos="fade-up" data-aos-delay="120">
                                 <div class="chart-header">
                                     <h3 class="chart-title">
-                                        <span data-translate="year">Year</span> 1 - 🏆 <span data-translate="top_performers">Top 3 Performers</span>
+                                        <span data-translate="year">Year</span> 1 - <i class="fas fa-trophy"></i> <span data-translate="top_performers">Top 3 Performers</span>
                                     </h3>
                                     <div class="chart-actions">
                                         <button class="chart-expand-btn" onclick="expandChart('topPerformersChart1')">⛶</button>
@@ -4890,7 +5055,7 @@ if ($page == 'reports') {
                             <div class="chart-card" data-aos="fade-up" data-aos-delay="160">
                                 <div class="chart-header">
                                     <h3 class="chart-title">
-                                        <span data-translate="year">Year</span> 2 - 🏆 <span data-translate="top_performers">Top 3 Performers</span>
+                                        <span data-translate="year">Year</span> 2 - <i class="fas fa-trophy"></i> <span data-translate="top_performers">Top 3 Performers</span>
                                     </h3>
                                     <div class="chart-actions">
                                         <button class="chart-expand-btn" onclick="expandChart('topPerformersChart2')">⛶</button>
@@ -5369,10 +5534,10 @@ if ($page == 'reports') {
                         <!-- Data Table Section -->
                         <div class="data-table-section" data-aos="fade-up">
                             <div class="section-header">
-                                <h3 class="section-title">📋 Detailed Reports</h3>
+                                <h3 class="section-title"><i class="fas fa-file-alt"></i> Detailed Reports</h3>
                                 <div class="export-actions">
-                                    <button class="export-btn" onclick="collapseAllReports()" data-translate="collapse_all">📁 Collapse All</button>
-                                    <button class="export-btn" onclick="exportData('csv')">📊 Export CSV</button>
+                                    <button class="export-btn" onclick="collapseAllReports()" data-translate="collapse_all"><i class="fas fa-folder-minus"></i> Collapse All</button>
+                                    <button class="export-btn" onclick="exportData('csv')"><i class="fas fa-file-csv"></i> Export CSV</button>
                                     <button class="export-btn" onclick="printTable()" data-translate="print">🖨️ Print</button>
                                 </div>
                             </div>
@@ -5693,7 +5858,7 @@ if ($page == 'reports') {
                                         ➕ Add Student
                                     </button>
                                     <button type="reset" class="clear-filters-btn" style="flex: 1;" data-translate="reset_form">
-                                        🔄 Reset Form
+                                        <i class="fas fa-undo"></i> Reset Form
                                     </button>
                                 </div>
                             </div>
@@ -5703,7 +5868,7 @@ if ($page == 'reports') {
                     <!-- Students List -->
                     <div class="data-table-section" data-aos="fade-up">
                         <div class="section-header">
-                            <h3 class="section-title" data-translate="students_list">📋 Students List</h3>
+                            <h3 class="section-title" data-translate="students_list"><i class="fas fa-list"></i> Students List</h3>
                             <div class="export-actions">
                                 <button class="export-btn" onclick="exportData('csv')" data-translate="export_csv">📊 Export CSV</button>
                                 <button class="export-btn" onclick="printTable()" data-translate="print">🖨️ Print</button>
@@ -5783,7 +5948,6 @@ if ($page == 'reports') {
                                         <th data-translate="class">Class</th>
                                         <th data-translate="academic_year">Year</th>
                                         <th data-translate="status">Status</th>
-                                        <th data-translate="email">Email</th>
                                         <th data-translate="phone">Phone</th>
                                         <th data-translate="subjects">Subjects</th>
                                         <th data-translate="actions">Actions</th>
@@ -5799,7 +5963,7 @@ if ($page == 'reports') {
                                         LEFT JOIN marks m ON s.id = m.student_id
                                         LEFT JOIN subjects sub ON m.subject_id = sub.id AND sub.year = s.year
                                         WHERE s.status = 'active'
-                                        GROUP BY s.id, s.name, s.age, s.gender, s.class_level, s.email, s.phone, s.year, s.status
+                                        GROUP BY s.id, s.name, s.age, s.gender, s.class_level, s.phone, s.year, s.status
                                         ORDER BY s.id
                                     ";
                                     $students_result = pg_query($conn, $students_query);
@@ -5854,7 +6018,6 @@ if ($page == 'reports') {
                                                 </span>
                                             <?php endif; ?>
                                         </td>
-                                        <td><?= htmlspecialchars($student['email'] ?? '') ?></td>
                                         <td><?= htmlspecialchars($student['phone'] ?? '') ?></td>
                                         <td>
                                             <?php if (!empty($student['enrolled_subjects'])): ?>
@@ -5875,16 +6038,16 @@ if ($page == 'reports') {
                                             <?php endif; ?>
                                         </td>
                                         <td>
-                                            <button class="export-btn" onclick="editStudent(<?= $student['id'] ?>)" style="margin: 2px;" data-translate="edit">Edit</button>
+                                            <button class="export-btn" onclick="editStudent(<?= $student['id'] ?>)" data-translate="edit">Edit</button>
                                             <button class="export-btn" onclick="handleStudentAction('delete_student', <?= $student['id'] ?>)" 
-                                                    style="background: var(--danger-color); color: white; margin: 2px;" data-translate="delete">Delete</button>
+                                                    style="background: var(--danger-color); color: white;" data-translate="delete">Delete</button>
                                             
                                             <?php if ($student['year'] == 1): ?>
                                                 <button class="export-btn" onclick="handleStudentAction('promote_student', <?= $student['id'] ?>)" 
-                                                        style="background: #10B981; color: white; margin: 2px;" data-translate="promote">Promote</button>
+                                                        style="background: #10B981; color: white;" data-translate="promote">Promote</button>
                                             <?php elseif ($student['year'] == 2): ?>
                                                 <button class="export-btn" onclick="graduateStudent(<?= $student['id'] ?>)" 
-                                                        style="background: #F59E0B; color: white; margin: 2px;" data-translate="graduate">Graduate</button>
+                                                        style="background: #F59E0B; color: white;" data-translate="graduate">Graduate</button>
                                             <?php endif; ?>
                                         </td>
                                     </tr>
@@ -5893,7 +6056,7 @@ if ($page == 'reports') {
                                     else:
                                     ?>
                                     <tr>
-                                        <td colspan="11" style="text-align: center; color: var(--text-light); padding: 2rem;">
+                                        <td colspan="10" style="text-align: center; color: var(--text-light); padding: 2rem;">
                                             No students found. Add some students to get started.
                                         </td>
                                     </tr>
@@ -6041,7 +6204,7 @@ if ($page == 'reports') {
                                 kpiCards[2].querySelector('.kpi-value').textContent = kpiValues.noLogins;
                                 kpiCards[3].querySelector('.kpi-value').textContent = kpiValues.subjectsNoTeacher;
                                 
-                                console.log('✅ KPI values force updated!');
+                                console.log('[SUCCESS] KPI values force updated!');
                                 console.log('Teachers KPI now shows:', kpiCards[0].querySelector('.kpi-value').textContent);
                             }
                         }
@@ -6273,7 +6436,7 @@ if ($page == 'reports') {
                     <!-- Graduated Students List -->
                     <div class="data-table-section" data-aos="fade-up">
                         <div class="section-header">
-                            <h3 class="section-title" data-translate="graduated_list">📋 Graduated Students List</h3>
+                            <h3 class="section-title" data-translate="graduated_list"><i class="fas fa-list"></i> Graduated Students List</h3>
                             <div class="export-actions">
                                 <button id="bulkDeleteGraduates" class="export-btn" onclick="bulkDeleteGraduates()" style="background: var(--danger-color); color: white; display: none;">
                                     <span data-translate="delete_selected">Delete Selected</span>
@@ -6594,7 +6757,7 @@ if ($page == 'reports') {
                                         </td>
                                         <td style="text-align: center;">
                                             <?php if ($teacher['subject_count'] > 0): ?>
-                                                <span class="total-subjects-badge" style="cursor: pointer;" onclick="toggleTeacherDetails(<?= $teacher['id'] ?>)">
+                                                <span class="total-subjects-badge" style="cursor: pointer;" onclick="toggleTeacherDetails(<?= $teacher['id'] ?>)" title="Click to view assigned subjects">
                                                     <span><?= $teacher['subject_count'] ?></span>
                                                     <span data-translate="subjects">subjects</span>
                                                 </span>
@@ -6603,86 +6766,14 @@ if ($page == 'reports') {
                                             <?php endif; ?>
                                         </td>
                                         <td style="text-align: center;">
-                                            <span style="padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; 
-                                                         background: #fafafa; color: #424242; border: 1px solid #e0e0e0;">
+                                            <span style="padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: 500;
+                                                         background: #f0f9ff; color: #0c4a6e; display: inline-block; border: 1px solid #bae6fd; white-space: nowrap;">
                                                 <?= date('M d, Y', strtotime($teacher['join_date'])) ?>
                                             </span>
                                         </td>
                                         <td style="text-align: center;">
                                             <button class="action-btn edit" onclick="editTeacher(<?= $teacher['id'] ?>)" data-translate="edit" title="Edit">Edit</button>
                                             <button class="action-btn delete" onclick="deleteTeacher(<?= $teacher['id'] ?>)" data-translate="delete" title="Delete">Delete</button>
-                                            <?php if ($teacher['subject_count'] > 0): ?>
-                                                <button class="action-btn view" onclick="toggleTeacherDetails(<?= $teacher['id'] ?>)" data-translate="view" title="View Details">View</button>
-                                            <?php endif; ?>
-                                        </td>
-                                    </tr>
-                                    
-                                    <!-- Teacher Details Row (Expandable) -->
-                                    <tr class="teacher-details-row" id="teacher-details-<?= $teacher['id'] ?>" style="display: none;">
-                                        <td colspan="10" style="padding: 0;">
-                                            <div class="subject-details-container" style="padding: 1.5rem; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);">
-                                                <h4 style="margin: 0 0 1rem 0; color: #1e3a8a; font-size: 1.1rem;">
-                                                    📚 <span data-translate="assigned_subjects">Assigned Subjects</span> - <?= htmlspecialchars($teacher['name']) ?>
-                                                </h4>
-                                                <?php
-                                                $assignments_query = "SELECT ts.*, s.subject_name, s.year as subject_year,
-                                                                            COUNT(DISTINCT m.student_id) as student_count
-                                                                     FROM teacher_subjects ts
-                                                                     JOIN subjects s ON ts.subject_id = s.id
-                                                                     LEFT JOIN marks m ON s.id = m.subject_id
-                                                                     WHERE ts.teacher_id = $1
-                                                                     GROUP BY ts.id, s.subject_name, s.year, ts.year, ts.class_level
-                                                                     ORDER BY ts.year, ts.class_level, s.subject_name";
-                                                $assignments_result = pg_query_params($conn, $assignments_query, array($teacher['id']));
-                                                
-                                                if ($assignments_result && pg_num_rows($assignments_result) > 0):
-                                                ?>
-                                                    <table class="subject-marks-table" style="width: 100%; background: white;">
-                                                        <thead>
-                                                            <tr style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                                                                <th data-translate="subject">Subject</th>
-                                                                <th data-translate="year">Year</th>
-                                                                <th data-translate="class">Class</th>
-                                                                <th data-translate="students">Students</th>
-                                                                <th data-translate="assigned_date">Assigned Date</th>
-                                                                <th data-translate="actions">Actions</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            <?php while($assignment = pg_fetch_assoc($assignments_result)): ?>
-                                                            <tr data-year="<?= $assignment['year'] ?>">
-                                                                <td><strong><?= htmlspecialchars($assignment['subject_name']) ?></strong></td>
-                                                                <td>
-                                                                    <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem;
-                                                                                 background: #f5f5f5; color: #000000; border: 1px solid #e0e0e0;">
-                                                                        <span data-translate="year">Year</span> <?= $assignment['year'] ?>
-                                                                    </span>
-                                                                </td>
-                                                                <td>
-                                                                    <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 500;
-                                                                                 background: #f3f4f6; color: #374151;">
-                                                                        <?= $assignment['class_level'] ?>
-                                                                    </span>
-                                                                </td>
-                                                                <td style="text-align: center;"><?= $assignment['student_count'] ?></td>
-                                                                <td><?= date('M d, Y', strtotime($assignment['assigned_date'])) ?></td>
-                                                                <td>
-                                                                    <button class="action-btn delete" onclick="removeTeacherAssignment(<?= $assignment['id'] ?>)" title="Remove Assignment">❌</button>
-                                                                </td>
-                                                            </tr>
-                                                            <?php endwhile; ?>
-                                                        </tbody>
-                                                    </table>
-                                                <?php else: ?>
-                                                    <p style="text-align: center; color: #64748b; padding: 2rem;" data-translate="no_assignments">No subject assignments yet</p>
-                                                <?php endif; ?>
-                                                
-                                                <div style="margin-top: 1rem; text-align: right;">
-                                                    <button class="apply-filters-btn" onclick="openAssignSubjectsModal(<?= $teacher['id'] ?>, '<?= htmlspecialchars($teacher['name']) ?>')">
-                                                        <span data-translate="assign_subjects">Assign Subjects</span>
-                                                    </button>
-                                                </div>
-                                            </div>
                                         </td>
                                     </tr>
                                     <?php 
@@ -6800,7 +6891,7 @@ if ($page == 'reports') {
                     <!-- Subjects List -->
                     <div class="data-table-section" data-aos="fade-up">
                         <div class="section-header">
-                            <h3 class="section-title" data-translate="subjects_list">📋 Subjects List</h3>
+                            <h3 class="section-title" data-translate="subjects_list"><i class="fas fa-list"></i> Subjects List</h3>
                             <div class="export-actions">
                                 <button class="export-btn" onclick="exportData('csv')" data-translate="export_csv">📊 Export CSV</button>
                                 <button class="export-btn" onclick="printTable()" data-translate="print">🖨️ Print</button>
@@ -6903,7 +6994,7 @@ if ($page == 'reports') {
                         <div class="section-header">
                             <h3 class="section-title" data-translate="marks_list"> Marks List</h3>
                             <div class="export-actions">
-                                <button class="export-btn" onclick="collapseAllMarks()" data-translate="collapse_all">📁 Collapse All</button>
+                                <button class="export-btn" onclick="collapseAllMarks()" data-translate="collapse_all"><i class="fas fa-folder-minus"></i> Collapse All</button>
                                 <button class="export-btn" onclick="exportData('csv')" data-translate="export_csv">📊 Export CSV</button>
                                 <button class="export-btn" onclick="printTable()" data-translate="print">🖨️ Print</button>
                             </div>
@@ -7243,7 +7334,7 @@ if ($page == 'reports') {
                                                             <!-- Year Total Row -->
                                                             <tr style="background: linear-gradient(135deg, <?= $year == 1 ? '#dbeafe' : '#f3e8ff' ?> 0%, <?= $year == 1 ? '#bfdbfe' : '#e9d5ff' ?> 100%); font-weight: 600; border-top: 2px solid <?= $year == 1 ? '#3b82f6' : '#a855f7' ?>;">
                                                                 <td colspan="9" style="text-align: left; padding: 12px; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1rem;">
-                                                                    📊 Year <?= $year ?> Total Credits
+                                                                    <i class="fas fa-chart-pie"></i> Year <?= $year ?> Total Credits
                                                                 </td>
                                                                 <td style="text-align: center; color: <?= $year == 1 ? '#1e40af' : '#6b21a8' ?>; font-size: 1.1rem;">
                                                                     <strong><?= number_format($year_totals[$year], 2) ?></strong>
@@ -7295,7 +7386,20 @@ if ($page == 'reports') {
 
         // Global subjects data for filters
         <?php
-        $all_subjects_for_filter = pg_query($conn, "SELECT id, subject_name, year FROM subjects ORDER BY year, subject_name");
+        if (isTeacher()) {
+            // For teachers: only show their assigned subjects
+            $teacher_id = $_SESSION['teacher_id'];
+            $all_subjects_for_filter = pg_query_params($conn, "
+                SELECT DISTINCT s.id, s.subject_name, ts.year
+                FROM teacher_subjects ts
+                JOIN subjects s ON ts.subject_id = s.id
+                WHERE ts.teacher_id = $1
+                ORDER BY ts.year, s.subject_name
+            ", [$teacher_id]);
+        } else {
+            // For admin: show all subjects
+            $all_subjects_for_filter = pg_query($conn, "SELECT id, subject_name, year FROM subjects ORDER BY year, subject_name");
+        }
         echo "const allSubjects = " . json_encode(pg_fetch_all($all_subjects_for_filter)) . ";\n";
         ?>
 
@@ -9056,7 +9160,7 @@ if ($page == 'reports') {
             notification.style.marginBottom = '1rem';
             notification.innerHTML = `
                 <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>${type === 'success' ? '✅' : '❌'} ${message}</span>
+                    <span>${type === 'success' ? '<i class="fas fa-check-circle"></i>' : '<i class="fas fa-times-circle"></i>'} ${message}</span>
                     <button onclick="this.parentElement.parentElement.remove()" style="background: transparent; border: none; color: white; font-size: 1.2rem; cursor: pointer; padding: 0 0.5rem;">×</button>
                 </div>
             `;
@@ -9113,10 +9217,8 @@ if ($page == 'reports') {
         function handleFormSubmit(event, form, page = null, onSuccess = null) {
             event.preventDefault();
             
-            // Close modal immediately if callback provided
-            if (typeof onSuccess === 'function') {
-                onSuccess();
-            }
+            console.log('Form submitted:', form);
+            console.log('Action:', new FormData(form).get('action'));
             
             showLoading('Saving Changes', 'Please wait...');
             
@@ -9126,16 +9228,27 @@ if ($page == 'reports') {
                 method: 'POST',
                 body: formData
             })
-            .then(response => response.text())
+            .then(response => {
+                console.log('Response status:', response.status);
+                return response.text();
+            })
             .then(data => {
+                console.log('Server response:', data);
                 hideLoading();
                 
                 // Check for success/error in response
                 const success = data.includes('successfully') || data.includes('Success');
                 const error = data.includes('Error:') || data.includes('error');
                 
+                console.log('Success:', success, 'Error:', error);
+                
                 if (success) {
                     showNotification('✓ Saved successfully!', 'success');
+                    
+                    // Close modal after success if callback provided
+                    if (typeof onSuccess === 'function') {
+                        onSuccess();
+                    }
                     
                     // Reset form if it's an add form
                     if (formData.get('action').includes('add')) {
@@ -9145,8 +9258,10 @@ if ($page == 'reports') {
                         form.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
                     }
                     
-                    // Reload table data immediately
-                    reloadTableData(page);
+                    // Reload page for updates to show
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 500);
                 } else if (error) {
                     // Extract error message if possible
                     const errorMatch = data.match(/Error: ([^<]+)/);
@@ -9155,7 +9270,16 @@ if ($page == 'reports') {
                 } else {
                     // Assume success
                     showNotification('✓ Updated!', 'success');
-                    reloadTableData(page);
+                    
+                    // Close modal after success if callback provided
+                    if (typeof onSuccess === 'function') {
+                        onSuccess();
+                    }
+                    
+                    // Reload page for updates to show
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 500);
                 }
             })
             .catch(error => {
@@ -10562,7 +10686,7 @@ if ($page == 'reports') {
             if (failedSubjects.length > 0) {
                 failedSubjectsHTML = `
                     <div style="margin-top: 1rem; padding: 1rem; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px;">
-                        <div style="font-weight: 600; color: #991b1b; margin-bottom: 0.5rem;">❌ Failed Subjects (Mark < 50):</div>
+                        <div style="font-weight: 600; color: #991b1b; margin-bottom: 0.5rem;"><i class="fas fa-times-circle"></i> Failed Subjects (Mark < 50):</div>
                         <ul style="list-style: none; padding: 0; margin: 0;">
                             ${failedSubjects.map(s => `
                                 <li style="padding: 0.5rem 0; border-bottom: 1px solid #fca5a5;">
@@ -10581,7 +10705,7 @@ if ($page == 'reports') {
             if (details.reasons && details.reasons.length > 0) {
                 requirementsHTML = `
                     <div style="margin-top: 1rem; padding: 1rem; background: #fffbeb; border: 1px solid #fcd34d; border-radius: 6px;">
-                        <div style="font-weight: 600; color: #92400e; margin-bottom: 0.5rem;">📋 Requirements:</div>
+                        <div style="font-weight: 600; color: #92400e; margin-bottom: 0.5rem;"><i class="fas fa-list-check"></i> Requirements:</div>
                         <ul style="margin: 0; padding-left: 1.5rem;">
                             ${details.reasons.map(r => `<li style="color: #78350f; margin: 0.3rem 0;">${r}</li>`).join('')}
                         </ul>
@@ -10593,7 +10717,7 @@ if ($page == 'reports') {
                 <div id="eligibilityErrorModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 100000; display: flex; align-items: center; justify-content: center; animation: fadeIn 0.2s ease;">
                     <div style="background: white; padding: 2rem; border-radius: 16px; width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3); animation: slideUp 0.3s ease;">
                         <div style="text-align: center; margin-bottom: 1.5rem;">
-                            <div style="font-size: 4rem; margin-bottom: 0.5rem;">⚠️</div>
+                            <div style="font-size: 4rem; margin-bottom: 0.5rem;"><i class="fas fa-exclamation-triangle" style="color: #F59E0B;"></i></div>
                             <h3 style="margin: 0; color: #dc2626; font-size: 1.5rem; font-weight: 700;">Cannot ${actionType === 'Promotion' ? 'Promote' : 'Graduate'} Student</h3>
                         </div>
                         
@@ -10657,56 +10781,64 @@ if ($page == 'reports') {
         function showEditModal(student, enrolledSubjects, allSubjects) {
             // Create modal HTML
             const modalHTML = `
-                <div id="editModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
-                    <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto;">
-                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Roboto', 'Noto Sans', sans-serif;" data-translate="edit_student">Edit Student</h3>
-                        <form id="editStudentForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'students', function(){ closeEditModal(); });">
-                            <input type="hidden" name="action" value="update_student">
-                            <input type="hidden" name="student_id" value="${student.id}">
-                            
-                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="full_name">Full Name</span> *</label>
-                                    <input type="text" name="student_name" value="${student.name || ''}" required 
-                                           style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="age">Age</span> *</label>
-                                    <input type="number" name="age" value="${student.age || ''}" min="15" max="30" required 
-                                           style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="gender">Gender</span> *</label>
-                                    <select name="gender" required style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                        <option value="" data-translate="select_gender">Select Gender</option>
-                                        <option value="Male" ${student.gender === 'Male' ? 'selected' : ''} data-translate="male">Male</option>
-                                        <option value="Female" ${student.gender === 'Female' ? 'selected' : ''} data-translate="female">Female</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="class">Class</span> *</label>
-                                    <select name="class_level" id="editStudentClassSelect" required style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                        <option value="" data-translate="select_class">Select Class</option>
-                                        <!-- Options will be populated by JavaScript based on year selection -->
-                                    </select>
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;"><span data-translate="academic_year">Academic Year</span> *</label>
-                                    <select name="year" id="editStudentYearSelect" required style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;" onchange="filterEditSubjectsByStudentYear(); updateEditClassOptions();">
-                                        <option value="" data-translate="select_year">Select Year</option>
-                                        <option value="1" ${student.year === '1' || student.year === 1 ? 'selected' : ''} data-translate="year_1">Year 1</option>
-                                        <option value="2" ${student.year === '2' || student.year === 2 ? 'selected' : ''} data-translate="year_2">Year 2</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;" data-translate="email">Email</label>
-                                    <input type="email" name="email" value="${student.email || ''}" placeholder="Enter email address..." data-translate-placeholder="email_placeholder_student"
-                                           style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;" data-translate="phone">Phone</label>
-                                    <input type="tel" name="phone" value="${student.phone || ''}"
-                                           style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
+                <div id="editModal" onclick="if(event.target.id === 'editModal') closeEditModal()" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; display: flex; align-items: center; justify-content: center; padding: 1rem;">
+                    <div onclick="event.stopPropagation()" style="background: white; border-radius: 12px; width: 95%; max-width: 900px; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+                        
+                        <!-- Header -->
+                        <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; border-radius: 12px 12px 0 0; display: flex; justify-content: space-between; align-items: center;">
+                            <h3 style="margin: 0; color: white; font-size: 1.25rem; font-weight: 600;">
+                                <i class="fas fa-user-graduate" style="margin-right: 0.5rem;"></i>
+                                <span data-translate="edit_student">Edit Student</span>
+                            </h3>
+                            <button onclick="closeEditModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                ×
+                            </button>
+                        </div>
+                        
+                        <!-- Content -->
+                        <div style="padding: 2rem; overflow-y: auto; flex: 1;">
+                            <form id="editStudentForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'students', function(){ closeEditModal(); });">
+                                <input type="hidden" name="action" value="update_student">
+                                <input type="hidden" name="student_id" value="${student.id}">
+                                
+                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; margin-bottom: 1.5rem;">
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;"><span data-translate="full_name">Full Name</span> *</label>
+                                        <input type="text" name="student_name" value="${student.name || ''}" required 
+                                               style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                    </div>
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;"><span data-translate="age">Age</span> *</label>
+                                        <input type="number" name="age" value="${student.age || ''}" min="15" max="30" required 
+                                               style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                    </div>
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;"><span data-translate="gender">Gender</span> *</label>
+                                        <select name="gender" required style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                            <option value="" data-translate="select_gender">Select Gender</option>
+                                            <option value="Male" ${student.gender === 'Male' ? 'selected' : ''} data-translate="male">Male</option>
+                                            <option value="Female" ${student.gender === 'Female' ? 'selected' : ''} data-translate="female">Female</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;"><span data-translate="class">Class</span> *</label>
+                                        <select name="class_level" id="editStudentClassSelect" required style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                            <option value="" data-translate="select_class">Select Class</option>
+                                            <!-- Options will be populated by JavaScript based on year selection -->
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;"><span data-translate="academic_year">Academic Year</span> *</label>
+                                        <select name="year" id="editStudentYearSelect" required style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;" onchange="filterEditSubjectsByStudentYear(); updateEditClassOptions();">
+                                            <option value="" data-translate="select_year">Select Year</option>
+                                            <option value="1" ${student.year === '1' || student.year === 1 ? 'selected' : ''} data-translate="year_1">Year 1</option>
+                                            <option value="2" ${student.year === '2' || student.year === 2 ? 'selected' : ''} data-translate="year_2">Year 2</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="phone">Phone</label>
+                                        <input type="tel" name="phone" value="${student.phone || ''}"
+                                               style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
                                 </div>
                             </div>
                             
@@ -10739,17 +10871,22 @@ if ($page == 'reports') {
                                 </small>
                             </div>
                             
-                            <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                                <button type="button" onclick="closeEditModal()" data-translate="cancel"
-                                        style="padding: 0.75rem 1.5rem; border: 1px solid #ddd; background: white; color: #666; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
-                                    Cancel
+                            <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #e5e7eb;">
+                                <button type="button" onclick="closeEditModal()" 
+                                        style="padding: 0.65rem 1.5rem; border: 1.5px solid #cbd5e1; background: white; color: #475569; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; font-size: 0.95rem;" 
+                                        onmouseover="this.style.background='#f1f5f9'; this.style.borderColor='#94a3b8'" onmouseout="this.style.background='white'; this.style.borderColor='#cbd5e1'">
+                                    <i class="fas fa-times" style="margin-right: 0.5rem;"></i>
+                                    <span data-translate="cancel">Cancel</span>
                                 </button>
-                                <button type="submit" data-translate="update_student"
-                                        style="padding: 0.75rem 1.5rem; border: none; background: #3B82F6; color: white; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
-                                    Update Student
+                                <button type="submit" 
+                                        style="padding: 0.65rem 1.5rem; border: none; background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); color: white; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; font-size: 0.95rem; box-shadow: 0 2px 8px rgba(30,58,138,0.3);" 
+                                        onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px rgba(30,58,138,0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(30,58,138,0.3)'">
+                                    <i class="fas fa-save" style="margin-right: 0.5rem;"></i>
+                                    <span data-translate="update_student">Update Student</span>
                                 </button>
                             </div>
                         </form>
+                        </div>
                     </div>
                 </div>
             `;
@@ -10841,50 +10978,72 @@ if ($page == 'reports') {
         function showEditSubjectModal(subject) {
             // Create modal HTML
             const modalHTML = `
-                <div id="editSubjectModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
-                    <div style="background: white; padding: 2rem; border-radius: 12px; width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto;">
-                        <h3 style="margin: 0 0 1.5rem 0; color: #333; font-family: 'Roboto', 'Noto Sans', sans-serif;">✏️ Edit Subject</h3>
-                        <form id="editSubjectForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'subjects', function(){ closeEditSubjectModal(); });">
-                            <input type="hidden" name="action" value="update_subject">
-                            <input type="hidden" name="subject_id" value="${subject.id}">
-                            
-                            <div style="display: flex; flex-direction: column; gap: 1rem; margin-bottom: 1.5rem;">
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Subject Name *</label>
-                                    <input type="text" name="subject_name" value="${subject.subject_name || ''}" required 
-                                           style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
+                <div id="editSubjectModal" onclick="if(event.target.id === 'editSubjectModal') closeEditSubjectModal()" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; display: flex; align-items: center; justify-content: center; padding: 1rem;">
+                    <div onclick="event.stopPropagation()" style="background: white; border-radius: 12px; width: 95%; max-width: 600px; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+                        
+                        <!-- Header -->
+                        <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; border-radius: 12px 12px 0 0; display: flex; justify-content: space-between; align-items: center;">
+                            <h3 style="margin: 0; color: white; font-size: 1.25rem; font-weight: 600;">
+                                <i class="fas fa-book" style="margin-right: 0.5rem;"></i>
+                                Edit Subject
+                            </h3>
+                            <button onclick="closeEditSubjectModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                ×
+                            </button>
+                        </div>
+                        
+                        <!-- Content -->
+                        <div style="padding: 2rem; overflow-y: auto; flex: 1;">
+                            <form id="editSubjectForm" method="POST" action="" onsubmit="return handleFormSubmit(event, this, 'subjects', function(){ closeEditSubjectModal(); });">
+                                <input type="hidden" name="action" value="update_subject">
+                                <input type="hidden" name="subject_id" value="${subject.id}">
+                                
+                                <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Subject Name *</label>
+                                        <input type="text" name="subject_name" value="${subject.subject_name || ''}" required 
+                                               style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                    </div>
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Description</label>
+                                        <textarea name="description" rows="3" 
+                                                  style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem; resize: vertical;">${subject.description || ''}</textarea>
+                                    </div>
+                                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem;">
+                                        <div>
+                                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Academic Year *</label>
+                                            <select name="year" required style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                                <option value="">Select Year</option>
+                                                <option value="1" ${subject.year === '1' || subject.year === 1 ? 'selected' : ''}>Year 1</option>
+                                                <option value="2" ${subject.year === '2' || subject.year === 2 ? 'selected' : ''}>Year 2</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Credits *</label>
+                                            <input type="number" name="credits" value="${subject.credits || ''}" min="1" max="50" required 
+                                                   style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                        </div>
+                                    </div>
                                 </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Description</label>
-                                    <textarea name="description" rows="3" 
-                                              style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem; resize: vertical;">${subject.description || ''}</textarea>
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Academic Year *</label>
-                                    <select name="year" required style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                        <option value="">Select Year</option>
-                                        <option value="1" ${subject.year === '1' || subject.year === 1 ? 'selected' : ''}>Year 1</option>
-                                        <option value="2" ${subject.year === '2' || subject.year === 2 ? 'selected' : ''}>Year 2</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: #333;">Credits *</label>
-                                    <input type="number" name="credits" value="${subject.credits || ''}" min="1" max="50" required 
-                                           style="width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.95rem;">
-                                </div>
-                            </div>
-                            
-                            <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                                <button type="button" onclick="closeEditSubjectModal()" 
-                                        style="padding: 0.75rem 1.5rem; border: 1px solid #ddd; background: white; color: #666; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
-                                    Cancel
-                                </button>
-                                <button type="submit" 
-                                        style="padding: 0.75rem 1.5rem; border: none; background: #3B82F6; color: white; border-radius: 6px; cursor: pointer; font-size: 0.95rem;">
-                                    Update Subject
-                                </button>
-                            </div>
-                        </form>
+                            </form>
+                        </div>
+                        
+                        <!-- Footer -->
+                        <div style="padding: 1.5rem 2rem; border-top: 1px solid #e5e7eb; background: #f8fafc; border-radius: 0 0 12px 12px; display: flex; gap: 1rem; justify-content: flex-end;">
+                            <button type="button" onclick="closeEditSubjectModal()" 
+                                    style="padding: 0.65rem 1.5rem; border: 1.5px solid #cbd5e1; background: white; color: #475569; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; font-size: 0.95rem;" 
+                                    onmouseover="this.style.background='#f1f5f9'; this.style.borderColor='#94a3b8'" onmouseout="this.style.background='white'; this.style.borderColor='#cbd5e1'">
+                                <i class="fas fa-times" style="margin-right: 0.5rem;"></i>
+                                Cancel
+                            </button>
+                            <button type="submit" form="editSubjectForm" 
+                                    style="padding: 0.65rem 1.5rem; border: none; background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); color: white; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; font-size: 0.95rem; box-shadow: 0 2px 8px rgba(30,58,138,0.3);" 
+                                    onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px rgba(30,58,138,0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(30,58,138,0.3)'">
+                                <i class="fas fa-save" style="margin-right: 0.5rem;"></i>
+                                Update Subject
+                            </button>
+                        </div>
+                        
                     </div>
                 </div>
             `;
@@ -11004,7 +11163,7 @@ if ($page == 'reports') {
                                 </div>
                                 <div style="grid-column: span 2;">
                                     <div style="background: #f0f9ff; padding: 1rem; border-radius: 6px; border: 1px solid #0ea5e9;">
-                                        <div style="font-weight: 500; color: #0c4a6e; margin-bottom: 0.5rem;">📊 <span data-translate="mark_calculation">Mark Calculation</span></div>
+                                        <div style="font-weight: 500; color: #0c4a6e; margin-bottom: 0.5rem;"><i class="fas fa-calculator"></i> <span data-translate="mark_calculation">Mark Calculation</span></div>
                                         <div style="font-size: 0.9rem; color: #0369a1;">
                                             Total = Final Exam + Midterm + Quizzes + Daily Activities<br>
                                             <strong><span data-translate="current_total">Current Total</span>: <span id="totalPreview">${(parseInt(mark.final_exam || 0) + parseInt(mark.midterm_exam || 0) + parseInt(mark.quizzes || 0) + parseInt(mark.daily_activities || 0))}</span>/100</strong>
@@ -12411,8 +12570,8 @@ if ($page == 'reports') {
                 sort_default: "Default",
                 sort_grade_low_high: "Grade: Low to High",
                 sort_grade_high_low: "Grade: High to Low",
-                clear_filters: "🔄 Clear Filters",
-                collapse_all: "📁 Collapse All",
+                clear_filters: "Clear Filters",
+                collapse_all: "Collapse All",
                 search: "Search",
                 search_student: "Search Student",
                 search_subject: "Search Subject",
@@ -12458,6 +12617,12 @@ if ($page == 'reports') {
                 remove_assignment: "Remove Assignment",
                 teacher_email: "teacher@school.edu",
                 filter_specialization: "Filter by Specialization",
+                filter_degree: "Filter by Degree",
+                filter_year: "Filter by Year",
+                filter_class: "Filter by Class",
+                view: "View",
+                degree: "Degree",
+                salary: "Salary",
                 search_teachers: "Search by name, email...",
                 no_teachers: "No teachers added yet. Click 'Add New Teacher' to get started.",
                 no_assignments: "No Assignments",
@@ -12517,7 +12682,7 @@ if ($page == 'reports') {
                 manage_teaching_schedule: "Manage your teaching schedule and academic tasks",
                 subjects_teaching: "Subjects Teaching",
                 kpi_total_students: "Total Students",
-                upcoming_tasks: "Upcoming Tasks",
+                students_pending_marks: "Students Pending Marks",
                 overdue_tasks: "Overdue Tasks",
                 create_new_task: "Create New Task",
                 task_type: "Task Type",
@@ -12541,7 +12706,7 @@ if ($page == 'reports') {
                 view_marks: "View Marks",
                 no_subjects_assigned: "No subjects assigned yet",
                 // End Teacher Translations
-                marks_list: "📝 Marks List",
+                marks_list: "Marks List",
                 search_filter_marks: "Search & Filter Marks",
                 add_mark: "Add Mark",
                 student: "Student",
@@ -12721,7 +12886,7 @@ if ($page == 'reports') {
                 search_filter: "البحث والتصفية",
                 search_filter_reports: "البحث وتصفية التقارير",
                 search_filter_students: "البحث وتصفية الطلاب",
-                subjects_list: "📋 قائمة المواد",
+                subjects_list: "قائمة المواد",
                 student_name: "اسم الطالب",
                 subject_name: "اسم المادة", 
                 class_level: "مستوى الصف",
@@ -12738,7 +12903,7 @@ if ($page == 'reports') {
                 top_performers: "أفضل 3 طلاب", 
                 performance_trends: "اتجاهات الأداء",
                 detailed_reports: "التقارير التفصيلية",
-                export_csv: "📊 تصدير CSV",
+                export_csv: "تصدير CSV",
                 print: "🖨️ طباعة",
                 full_name: "الاسم الكامل",
                 name: "الاسم",
@@ -12779,8 +12944,8 @@ if ($page == 'reports') {
                 sort_default: "افتراضي",
                 sort_grade_low_high: "الدرجة: من الأدنى إلى الأعلى",
                 sort_grade_high_low: "الدرجة: من الأعلى إلى الأدنى",
-                clear_filters: "🔄 مسح التصفيات",
-                collapse_all: "📁 طي الكل",
+                clear_filters: "مسح التصفيات",
+                collapse_all: "طي الكل",
                 search: "البحث",
                 search_student: "البحث عن طالب",
                 search_subject: "البحث عن مادة",
@@ -12826,6 +12991,12 @@ if ($page == 'reports') {
                 remove_assignment: "إزالة التكليف",
                 teacher_email: "teacher@school.edu",
                 filter_specialization: "تصفية حسب التخصص",
+                filter_degree: "تصفية حسب الدرجة",
+                filter_year: "تصفية حسب السنة",
+                filter_class: "تصفية حسب الصف",
+                view: "عرض",
+                degree: "الدرجة",
+                salary: "الراتب",
                 search_teachers: "البحث بالاسم، البريد...",
                 no_teachers: "لم تتم إضافة معلمين بعد. انقر على 'إضافة معلم جديد' للبدء.",
                 no_assignments: "لا توجد تكليفات",
@@ -12885,7 +13056,7 @@ if ($page == 'reports') {
                 manage_teaching_schedule: "إدارة جدول التدريس والمهام الأكاديمية",
                 subjects_teaching: "المواد التي تدرسها",
                 kpi_total_students: "إجمالي الطلاب",
-                upcoming_tasks: "المهام القادمة",
+                students_pending_marks: "الطلاب بانتظار الدرجات",
                 overdue_tasks: "المهام المتأخرة",
                 create_new_task: "إنشاء مهمة جديدة",
                 task_type: "نوع المهمة",
@@ -12909,7 +13080,7 @@ if ($page == 'reports') {
                 view_marks: "عرض الدرجات",
                 no_subjects_assigned: "لم يتم تعيين مواد بعد",
                 // End Teacher Translations
-                marks_list: "📝 قائمة الدرجات",
+                marks_list: "قائمة الدرجات",
                 search_filter_marks: "البحث وتصفية الدرجات",
                 add_mark: "إضافة درجة",
                 student: "الطالب",
@@ -13094,7 +13265,7 @@ if ($page == 'reports') {
                 search_filter: "گەڕان و پاڵاوتن",
                 search_filter_reports: "گەڕان و پاڵاوتنی ڕاپۆرتەکان",
                 search_filter_students: "گەڕان و پاڵاوتنی قوتابییەکان",
-                subjects_list: "📋 لیستی وانەکان",
+                subjects_list: "لیستی وانەکان",
                 student_name: "ناوی قوتابی",
                 subject_name: "ناوی وانە",
                 class_level: "ئاستی پۆل", 
@@ -13110,8 +13281,8 @@ if ($page == 'reports') {
                 subject_performance: "کارایی وانەکان",
                 top_performers: "باشترین 3 قوتابی",
                 performance_trends: "ئاراستەی کارایی", 
-                detailed_reports: "📋 ڕاپۆرتە ورددەکان",
-                export_csv: "📊 هەناردنی CSV",
+                detailed_reports: "ڕاپۆرتە ورددەکان",
+                export_csv: "هەناردنی CSV",
                 print: "🖨️ چاپکردن",
                 full_name: "ناوی تەواو",
                 name: "ناو",
@@ -13152,8 +13323,8 @@ if ($page == 'reports') {
                 sort_default: "بنەڕەتی",
                 sort_grade_low_high: "نمرە: لە کەم بۆ زۆر",
                 sort_grade_high_low: "نمرە: لە زۆر بۆ کەم",
-                clear_filters: "🔄 پاڵاوتنەکان بسڕەوە",
-                collapse_all: "📁 هەموو داخستن",
+                clear_filters: "پاڵاوتنەکان بسڕەوە",
+                collapse_all: "هەموو داخستن",
                 search: "گەڕان",
                 search_student: "گەڕان بەدوای قوتابی",
                 search_subject: "گەڕان بەدوای وانە",
@@ -13170,7 +13341,7 @@ if ($page == 'reports') {
                 manage_student_info: "بەڕێوەبردنی زانیاری قوتابییان و تۆمارکردن",
                 manage_teacher_info: "بەڕێوەبردنی مامۆستایان و دیاریکردنی وانەکان",
                 input_manage_marks: "تۆمارکردن و بەڕێوەبردنی نمرەی قوتابییان",
-                marks_list: "📝 لیستی نمرەکان",
+                marks_list: "لیستی نمرەکان",
                 search_filter_marks: "گەڕان و پاڵاوتنی نمرەکان",
                 nav_teachers: "مامۆستایان",
                 teachers_title: "بەڕێوەبردنی مامۆستایان",
@@ -13200,6 +13371,12 @@ if ($page == 'reports') {
                 remove_assignment: "لابردنی دیاریکراو",
                 teacher_email: "ئیمەیڵی مامۆستا",
                 filter_specialization: "پاڵاوتن بە پسپۆڕی",
+                filter_degree: "پاڵاوتن بە بڕوانامە",
+                filter_year: "پاڵاوتن بە ساڵ",
+                filter_class: "پاڵاوتن بە پۆل",
+                view: "پیشاندان",
+                degree: "بڕوانامە",
+                salary: "مووچە",
                 search_teachers: "گەڕان بە ناو، ئیمەیڵ...",
                 no_teachers: "هێشتا هیچ مامۆستایەک زیادنەکراوە. کرتە لە 'مامۆستای نوێ زیادبکە' بکە.",
                 no_assignments: "دیاریکراو نییە",
@@ -13259,7 +13436,7 @@ if ($page == 'reports') {
                 manage_teaching_schedule: "بەڕێوەبردنی خشتەی وانەوتنەوە و ئەرکە ئەکادیمیەکان",
                 subjects_teaching: "وانە وتنەوەکان",
                 kpi_total_students: "کۆی گشتی قوتابیان",
-                upcoming_tasks: "ئەرکە داهاتووەکان",
+                students_pending_marks: "قوتابیانی چاوەڕوانی نمرە",
                 overdue_tasks: "ئەرکە دواکەوتووەکان",
                 create_new_task: "دروستکردنی ئەرکی نوێ",
                 task_type: "جۆری ئەرک",
@@ -13837,7 +14014,7 @@ if ($page == 'reports') {
                     <div style="background: white; border-radius: 12px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; position: relative;">
                         <div style="padding: 1.5rem; border-bottom: 1px solid #E5E7EB; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 12px 12px 0 0;">
                             <h3 style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                                📈 Promote to Year 2
+                                <i class="fas fa-arrow-up"></i> Promote to Year 2
                             </h3>
                             <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 0.9rem;">Select Year 2 subjects for this student</p>
                             <button onclick="this.closest('.promotion-modal').remove()" 
@@ -13847,7 +14024,7 @@ if ($page == 'reports') {
                         </div>
                         <div style="padding: 1.5rem;">
                             <div style="background: #F0FDF4; padding: 1rem; border-radius: 6px; border-left: 4px solid #059669; margin-bottom: 1.5rem;">
-                                <h4 style="margin: 0 0 0.5rem 0; color: #059669;">✅ Student Eligible for Promotion</h4>
+                                <h4 style="margin: 0 0 0.5rem 0; color: #059669;"><i class="fas fa-check-circle"></i> Student Eligible for Promotion</h4>
                                 <p style="margin: 0; font-size: 0.9rem; color: #065F46;">
                                     All requirements met! Select Year 2 subjects to enroll.
                                 </p>
@@ -13866,7 +14043,7 @@ if ($page == 'reports') {
                                     </button>
                                     <button onclick="executePromotion(${studentId})" 
                                             style="background: #10B981; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 6px; cursor: pointer; font-weight: 600;">
-                                        📈 Promote Student
+                                        <i class="fas fa-arrow-up"></i> Promote Student
                                     </button>
                                 </div>
                             </div>
@@ -14372,13 +14549,13 @@ if ($page == 'reports') {
             popup.innerHTML = `
                 <div style="background: white; padding: 2.5rem; border-radius: 16px; max-width: 500px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
                     <div style="text-align: center; margin-bottom: 2rem;">
-                        <div style="font-size: 60px; margin-bottom: 1rem;">✅</div>
+                        <div style="font-size: 60px; margin-bottom: 1rem;"><i class="fas fa-check-circle" style="color: #10B981;"></i></div>
                         <h2 style="margin: 0 0 0.5rem 0; color: #10b981; font-size: 24px;">Teacher Added Successfully!</h2>
                         <p style="margin: 0; color: #666; font-size: 14px;">Login credentials generated for ${teacherName}</p>
                     </div>
                     
                     <div style="background: #f8f9fa; padding: 1.5rem; border-radius: 12px; margin-bottom: 1.5rem; border-left: 4px solid #10b981;">
-                        <h3 style="margin: 0 0 1rem 0; color: #333; font-size: 16px; font-weight: 600;">🔐 Login Credentials</h3>
+                        <h3 style="margin: 0 0 1rem 0; color: #333; font-size: 16px; font-weight: 600;"><i class="fas fa-key"></i> Login Credentials</h3>
                         
                         <div style="margin-bottom: 1rem;">
                             <label style="display: block; color: #666; font-size: 12px; margin-bottom: 0.5rem; font-weight: 500;">Username</label>
@@ -14387,7 +14564,7 @@ if ($page == 'reports') {
                                     style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace; font-size: 14px; background: white;">
                                 <button onclick="copyToClipboard('credUsername', this)" 
                                     style="padding: 10px 16px; background: #1e3a8a; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; white-space: nowrap;">
-                                    📋 Copy
+                                    <i class="fas fa-copy"></i> Copy
                                 </button>
                             </div>
                         </div>
@@ -14399,7 +14576,7 @@ if ($page == 'reports') {
                                     style="flex: 1; padding: 10px; border: 2px solid #e0e0e0; border-radius: 8px; font-family: monospace; font-size: 14px; background: white;">
                                 <button onclick="copyToClipboard('credPassword', this)" 
                                     style="padding: 10px 16px; background: #1e3a8a; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; white-space: nowrap;">
-                                    📋 Copy
+                                    <i class="fas fa-copy"></i> Copy
                                 </button>
                             </div>
                         </div>
@@ -14407,7 +14584,7 @@ if ($page == 'reports') {
                     
                     <div style="background: #fff3cd; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; border-left: 4px solid #ffc107;">
                         <p style="margin: 0; color: #856404; font-size: 13px; line-height: 1.5;">
-                            ⚠️ <strong>Important:</strong> Please share these credentials securely with the teacher. 
+                            <i class="fas fa-exclamation-triangle"></i> <strong>Important:</strong> Please share these credentials securely with the teacher. 
                             They should change the password on first login.
                         </p>
                     </div>
@@ -14569,14 +14746,130 @@ if ($page == 'reports') {
         }
         
         function toggleTeacherDetails(teacherId) {
-            const detailsRow = document.getElementById('teacher-details-' + teacherId);
-            if (detailsRow) {
-                if (detailsRow.style.display === 'none' || detailsRow.style.display === '') {
-                    detailsRow.style.display = 'table-row';
-                } else {
-                    detailsRow.style.display = 'none';
-                }
+            showLoader('Loading teacher subjects...');
+            
+            fetch(`?action=get_teacher_subjects&teacher_id=${teacherId}`)
+                .then(response => response.json())
+                .then(data => {
+                    hideLoader();
+                    if (data.success) {
+                        showTeacherSubjectsModal(data.teacher, data.assignments);
+                    } else {
+                        showErrorMessage(data.message || 'Failed to load teacher subjects');
+                    }
+                })
+                .catch(error => {
+                    hideLoader();
+                    console.error('Error:', error);
+                    showErrorMessage('Failed to load teacher subjects');
+                });
+        }
+        
+        function showTeacherSubjectsModal(teacher, assignments) {
+            const escape = str => String(str).replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[m]));
+            
+            const assignmentsHTML = assignments && assignments.length > 0 ? assignments.map(a => `
+                <div onclick="event.stopPropagation()" style="padding: 1rem; margin-bottom: 0.75rem; background: #f8fafc; border-left: 4px solid #1e3a8a; border-radius: 6px; display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; cursor: default; transition: all 0.2s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#f8fafc'">
+                    <div style="flex: 1;">
+                        <div style="font-weight: 700; color: #1e3a8a; font-size: 1.1rem; margin-bottom: 0.5rem;">
+                            ${escape(a.subject_name)}
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                            <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #1e3a8a; color: white;">
+                                <i class="fas fa-calendar-alt"></i> Year ${a.year}
+                            </span>
+                            <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #2563eb; color: white;">
+                                <i class="fas fa-door-open"></i> Class ${escape(a.class_level)}
+                            </span>
+                            <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #3b82f6; color: white;">
+                                <i class="fas fa-users"></i> ${a.student_count} Students
+                            </span>
+                            <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; background: #e5e7eb; color: #64748b;">
+                                <i class="fas fa-clock"></i> Assigned ${a.assigned_date}
+                            </span>
+                        </div>
+                    </div>
+                    <button class="action-btn delete" onclick="removeTeacherAssignmentFromModal(${a.id}, ${teacher.id})" title="Remove Assignment" style="padding: 8px 14px; font-size: 0.85rem;">
+                        <i class="fas fa-trash-alt" style="margin-right: 0.4rem;"></i>Remove
+                    </button>
+                </div>
+            `).join('') : `
+                <div style="text-align: center; padding: 3rem;">
+                    <i class="fas fa-book-open" style="font-size: 4rem; color: #cbd5e1; margin-bottom: 1rem;"></i>
+                    <p style="color: #94a3b8; font-size: 1rem; margin: 0;">No subject assignments yet</p>
+                </div>
+            `;
+            
+            const modalHTML = `
+                <div id="teacherSubjectsModal" onclick="if(event.target.id === 'teacherSubjectsModal') closeTeacherSubjectsModal()" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                     background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+                    <div onclick="event.stopPropagation()" style="background: white; padding: 0; border-radius: 12px; max-width: 800px; width: 90%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                        <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; color: white; display: flex; align-items: center; justify-content: space-between;">
+                            <h3 style="margin: 0; font-size: 1.3rem; display: flex; align-items: center; gap: 0.75rem;">
+                                <i class="fas fa-chalkboard-teacher"></i>
+                                <span>Assigned Subjects - ${escape(teacher.name)}</span>
+                            </h3>
+                            <button onclick="closeTeacherSubjectsModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        <div style="padding: 1.5rem 2rem; overflow-y: auto; flex: 1;">
+                            ${assignmentsHTML}
+                        </div>
+                        <div style="padding: 1.5rem 2rem; border-top: 2px solid #e5e7eb; background: #f9fafb; display: flex; justify-content: center; gap: 1rem;">
+                            <button class="apply-filters-btn" onclick="openAssignSubjectsModalFromTeacher(${teacher.id}, '${escape(teacher.name)}')" style="padding: 0.75rem 2rem; font-size: 0.95rem;">
+                                <i class="fas fa-plus-circle" style="margin-right: 0.5rem;"></i>
+                                <span data-translate="assign_subjects">Assign New Subject</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+        }
+        
+        function closeTeacherSubjectsModal() {
+            const modal = document.getElementById('teacherSubjectsModal');
+            if (modal) modal.remove();
+        }
+        
+        function removeTeacherAssignmentFromModal(assignmentId, teacherId) {
+            if (confirm('Are you sure you want to remove this assignment?')) {
+                showLoader('Removing assignment...');
+                
+                const formData = new FormData();
+                formData.append('action', 'remove_teacher_assignment');
+                formData.append('assignment_id', assignmentId);
+                
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        hideLoader();
+                        if (data.success) {
+                            showSuccessMessage('Assignment removed successfully');
+                            // Refresh the modal content
+                            closeTeacherSubjectsModal();
+                            setTimeout(() => toggleTeacherDetails(teacherId), 300);
+                        } else {
+                            showErrorMessage(data.message || 'Failed to remove assignment');
+                        }
+                    })
+                    .catch(error => {
+                        hideLoader();
+                        console.error('Error:', error);
+                        showErrorMessage('Failed to remove assignment');
+                    });
             }
+        }
+        
+        function openAssignSubjectsModalFromTeacher(teacherId, teacherName) {
+            // Store teacher info to refresh modal after assignment
+            window.currentTeacherId = teacherId;
+            openAssignSubjectsModal(teacherId, teacherName);
         }
         
         function editTeacher(teacherId) {
@@ -14610,66 +14903,129 @@ if ($page == 'reports') {
             };
             
             const modalHTML = `
-                <div id="editTeacherModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
-                     background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10000;">
-                    <div style="background: white; padding: 2rem; border-radius: 12px; max-width: 650px; width: 90%; max-height: 90vh; overflow-y: auto;">
-                        <h3 style="margin: 0 0 1.5rem 0; color: #1e3a8a;"><span data-translate="edit_teacher">Edit Teacher</span></h3>
-                        <form id="editTeacherForm" onsubmit="submitEditTeacher(event, ${teacher.id})">
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="full_name">Full Name</label>
-                                <input type="text" name="teacher_name" value="${escape(teacher.name)}" class="premium-select" required style="width: 100%;">
-                            </div>
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="email">Email</label>
-                                <input type="email" name="email" value="${escape(teacher.email)}" class="premium-select" required style="width: 100%;">
-                            </div>
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="phone">Phone</label>
-                                <input type="tel" name="phone" value="${escape(teacher.phone || '')}" class="premium-select" style="width: 100%;">
-                            </div>
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="specialization">Specialization</label>
-                                <select name="specialization" class="premium-select" required style="width: 100%;">
-                                    <option value="Mathematics" ${teacher.specialization === 'Mathematics' ? 'selected' : ''}>Mathematics</option>
-                                    <option value="Physics" ${teacher.specialization === 'Physics' ? 'selected' : ''}>Physics</option>
-                                    <option value="Chemistry" ${teacher.specialization === 'Chemistry' ? 'selected' : ''}>Chemistry</option>
-                                    <option value="Biology" ${teacher.specialization === 'Biology' ? 'selected' : ''}>Biology</option>
-                                    <option value="English" ${teacher.specialization === 'English' ? 'selected' : ''}>English</option>
-                                    <option value="Arabic" ${teacher.specialization === 'Arabic' ? 'selected' : ''}>Arabic</option>
-                                    <option value="Kurdish" ${teacher.specialization === 'Kurdish' ? 'selected' : ''}>Kurdish</option>
-                                    <option value="Computer Science" ${teacher.specialization === 'Computer Science' ? 'selected' : ''}>Computer Science</option>
-                                    <option value="History" ${teacher.specialization === 'History' ? 'selected' : ''}>History</option>
-                                    <option value="Geography" ${teacher.specialization === 'Geography' ? 'selected' : ''}>Geography</option>
-                                    <option value="Islamic Studies" ${teacher.specialization === 'Islamic Studies' ? 'selected' : ''}>Islamic Studies</option>
-                                    <option value="Physical Education" ${teacher.specialization === 'Physical Education' ? 'selected' : ''}>Physical Education</option>
-                                    <option value="Arts" ${teacher.specialization === 'Arts' ? 'selected' : ''}>Arts</option>
-                                    <option value="Management" ${teacher.specialization === 'Management' ? 'selected' : ''}>Management</option>
-                                </select>
-                            </div>
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="degree">Degree</label>
-                                <select name="degree" class="premium-select" required style="width: 100%;">
-                                    <option value="High School Diploma" ${teacher.degree === 'High School Diploma' ? 'selected' : ''}>High School Diploma</option>
-                                    <option value="Associate Degree" ${teacher.degree === 'Associate Degree' ? 'selected' : ''}>Associate Degree</option>
-                                    <option value="Bachelor's Degree" ${teacher.degree === "Bachelor's Degree" ? 'selected' : ''}>Bachelor's Degree</option>
-                                    <option value="Master's Degree" ${teacher.degree === "Master's Degree" ? 'selected' : ''}>Master's Degree</option>
-                                    <option value="Doctorate (PhD)" ${teacher.degree === 'Doctorate (PhD)' ? 'selected' : ''}>Doctorate (PhD)</option>
-                                    <option value="Professional Certificate" ${teacher.degree === 'Professional Certificate' ? 'selected' : ''}>Professional Certificate</option>
-                                </select>
-                            </div>
-                            <div style="margin-bottom: 1rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="salary">Monthly Salary (IQD)</label>
-                                <input type="number" name="salary" value="${teacher.salary || ''}" class="premium-select" style="width: 100%;" min="0" step="1000">
-                            </div>
-                            <div style="margin-bottom: 1.5rem;">
-                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="join_date">Join Date</label>
-                                <input type="date" name="join_date" value="${teacher.join_date}" class="premium-select" style="width: 100%;">
-                            </div>
-                            <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                                <button type="button" onclick="closeEditTeacherModal()" class="export-btn" style="background: #6b7280;" data-translate="cancel">Cancel</button>
-                                <button type="submit" class="apply-filters-btn" data-translate="update">Update</button>
-                            </div>
-                        </form>
+                <div id="editTeacherModal" onclick="if(event.target.id === 'editTeacherModal') closeEditTeacherModal()" 
+                     style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); 
+                     display: flex; align-items: center; justify-content: center; z-index: 10000; padding: 1rem;">
+                    <div onclick="event.stopPropagation()" style="background: white; border-radius: 12px; max-width: 900px; width: 95%; 
+                         max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+                        
+                        <!-- Header -->
+                        <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; 
+                             border-radius: 12px 12px 0 0; display: flex; justify-content: space-between; align-items: center;">
+                            <h3 style="margin: 0; color: white; font-size: 1.25rem; font-weight: 600;">
+                                <i class="fas fa-user-edit" style="margin-right: 0.5rem;"></i>
+                                <span data-translate="edit_teacher">Edit Teacher</span>
+                            </h3>
+                            <button onclick="closeEditTeacherModal()" style="background: rgba(255,255,255,0.2); border: none; 
+                                 color: white; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; 
+                                 display: flex; align-items: center; justify-content: center; font-size: 1.25rem; 
+                                 transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" 
+                                 onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                ×
+                            </button>
+                        </div>
+                        
+                        <!-- Content -->
+                        <div style="padding: 2rem; overflow-y: auto; flex: 1;">
+                            <form id="editTeacherForm" onsubmit="submitEditTeacher(event, ${teacher.id})">
+                                <!-- 2 Column Grid Layout -->
+                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem;">
+                                    
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="full_name">Full Name</label>
+                                        <input type="text" name="teacher_name" value="${escape(teacher.name)}" class="premium-select" required 
+                                               style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                    </div>
+                                    
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="email">Email</label>
+                                        <input type="email" name="email" value="${escape(teacher.email)}" class="premium-select" required 
+                                               style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                    </div>
+                                    
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="phone">Phone</label>
+                                        <input type="tel" name="phone" value="${escape(teacher.phone || '')}" class="premium-select" 
+                                               style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                    </div>
+                                    
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="specialization">Specialization</label>
+                                        <select name="specialization" class="premium-select" required 
+                                                style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                            <option value="Mathematics" ${teacher.specialization === 'Mathematics' ? 'selected' : ''}>Mathematics</option>
+                                            <option value="Physics" ${teacher.specialization === 'Physics' ? 'selected' : ''}>Physics</option>
+                                            <option value="Chemistry" ${teacher.specialization === 'Chemistry' ? 'selected' : ''}>Chemistry</option>
+                                            <option value="Biology" ${teacher.specialization === 'Biology' ? 'selected' : ''}>Biology</option>
+                                            <option value="English" ${teacher.specialization === 'English' ? 'selected' : ''}>English</option>
+                                            <option value="Arabic" ${teacher.specialization === 'Arabic' ? 'selected' : ''}>Arabic</option>
+                                            <option value="Kurdish" ${teacher.specialization === 'Kurdish' ? 'selected' : ''}>Kurdish</option>
+                                            <option value="Computer Science" ${teacher.specialization === 'Computer Science' ? 'selected' : ''}>Computer Science</option>
+                                            <option value="History" ${teacher.specialization === 'History' ? 'selected' : ''}>History</option>
+                                            <option value="Geography" ${teacher.specialization === 'Geography' ? 'selected' : ''}>Geography</option>
+                                            <option value="Islamic Studies" ${teacher.specialization === 'Islamic Studies' ? 'selected' : ''}>Islamic Studies</option>
+                                            <option value="Physical Education" ${teacher.specialization === 'Physical Education' ? 'selected' : ''}>Physical Education</option>
+                                            <option value="Arts" ${teacher.specialization === 'Arts' ? 'selected' : ''}>Arts</option>
+                                            <option value="Management" ${teacher.specialization === 'Management' ? 'selected' : ''}>Management</option>
+                                        </select>
+                                    </div>
+                                    
+                                    <div>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="degree">Degree</label>
+                                        <select name="degree" class="premium-select" required 
+                                                style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                            <option value="High School Diploma" ${teacher.degree === 'High School Diploma' ? 'selected' : ''}>High School Diploma</option>
+                                            <option value="Associate Degree" ${teacher.degree === 'Associate Degree' ? 'selected' : ''}>Associate Degree</option>
+                                            <option value="Bachelor's Degree" ${teacher.degree === "Bachelor's Degree" ? 'selected' : ''}>Bachelor's Degree</option>
+                                            <option value="Master's Degree" ${teacher.degree === "Master's Degree" ? 'selected' : ''}>Master's Degree</option>
+                                            <option value="Doctorate (PhD)" ${teacher.degree === 'Doctorate (PhD)' ? 'selected' : ''}>Doctorate (PhD)</option>
+                                            <option value="Professional Certificate" ${teacher.degree === 'Professional Certificate' ? 'selected' : ''}>Professional Certificate</option>
+                                        </select>
+                                    </div>
+                                    
+                                    <div style="grid-column: span 2;">
+                                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem;">
+                                            <div>
+                                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="salary">Monthly Salary (IQD)</label>
+                                                <input type="number" name="salary" value="${teacher.salary || ''}" class="premium-select" min="0" step="1000"
+                                                       style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                            </div>
+                                            
+                                            <div>
+                                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="join_date">Join Date</label>
+                                                <input type="date" name="join_date" value="${teacher.join_date}" class="premium-select" 
+                                                       style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <!-- Footer -->
+                        <div style="padding: 1.5rem 2rem; border-top: 1px solid #e5e7eb; background: #f8fafc; 
+                             border-radius: 0 0 12px 12px; display: flex; gap: 1rem; justify-content: flex-end;">
+                            <button type="button" onclick="closeEditTeacherModal()" 
+                                    style="padding: 0.65rem 1.5rem; border: 1.5px solid #cbd5e1; background: white; 
+                                    color: #475569; border-radius: 6px; cursor: pointer; font-weight: 600; 
+                                    transition: all 0.2s; font-size: 0.95rem;" 
+                                    onmouseover="this.style.background='#f1f5f9'; this.style.borderColor='#94a3b8'" 
+                                    onmouseout="this.style.background='white'; this.style.borderColor='#cbd5e1'">
+                                <i class="fas fa-times" style="margin-right: 0.5rem;"></i>
+                                <span data-translate="cancel">Cancel</span>
+                            </button>
+                            <button type="submit" form="editTeacherForm" 
+                                    style="padding: 0.65rem 1.5rem; border: none; background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); 
+                                    color: white; border-radius: 6px; cursor: pointer; font-weight: 600; 
+                                    transition: all 0.2s; font-size: 0.95rem; box-shadow: 0 2px 8px rgba(30,58,138,0.3);" 
+                                    onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px rgba(30,58,138,0.4)'" 
+                                    onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(30,58,138,0.3)'">
+                                <i class="fas fa-save" style="margin-right: 0.5rem;"></i>
+                                <span data-translate="update">Update</span>
+                            </button>
+                        </div>
+                        
                     </div>
                 </div>
             `;
@@ -15084,10 +15440,16 @@ if ($page == 'reports') {
             };
             
             const modalHTML = `
-                <div id="assignSubjectsModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
-                     background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10000;">
-                    <div style="background: white; padding: 2rem; border-radius: 12px; max-width: 700px; width: 90%; max-height: 90vh; overflow-y: auto;">
-                        <h3 style="margin: 0 0 1.5rem 0; color: #1e3a8a;"><span data-translate="assign_subjects">Assign Subjects</span> - ${escape(teacherName)}</h3>
+                <div id="assignSubjectsModal" onclick="if(event.target.id === 'assignSubjectsModal') closeAssignSubjectsModal()" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                     background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 10001;">
+                    <div onclick="event.stopPropagation()" style="background: white; padding: 0; border-radius: 12px; max-width: 700px; width: 90%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                        <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; color: white; display: flex; align-items: center; justify-content: space-between;">
+                            <h3 style="margin: 0; color: white; font-size: 1.2rem;"><i class="fas fa-plus-circle" style="margin-right: 0.5rem;"></i><span data-translate="assign_subjects">Assign Subjects</span> - ${escape(teacherName)}</h3>
+                            <button onclick="closeAssignSubjectsModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        <div style="padding: 2rem; overflow-y: auto; flex: 1;">
                         <form id="assignSubjectsForm" onsubmit="submitAssignSubject(event, ${teacherId})">
                             <div style="margin-bottom: 1rem;">
                                 <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;" data-translate="subject">Subject</label>
@@ -15110,11 +15472,12 @@ if ($page == 'reports') {
                                     <option value="C">Class C</option>
                                 </select>
                             </div>
-                            <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                                <button type="button" onclick="closeAssignSubjectsModal()" class="export-btn" style="background: #6b7280;" data-translate="cancel">Cancel</button>
-                                <button type="submit" class="apply-filters-btn" data-translate="assign">Assign</button>
-                            </div>
                         </form>
+                        </div>
+                        <div style="padding: 1.5rem 2rem; border-top: 2px solid #e5e7eb; background: #f9fafb; display: flex; gap: 1rem; justify-content: flex-end;">
+                            <button type="button" onclick="closeAssignSubjectsModal()" class="export-btn" style="background: #6b7280; padding: 0.75rem 1.5rem;" data-translate="cancel">Cancel</button>
+                            <button type="submit" form="assignSubjectsForm" class="apply-filters-btn" style="padding: 0.75rem 1.5rem;" data-translate="assign">Assign Subject</button>
+                        </div>
                     </div>
                 </div>
             `;
@@ -15162,9 +15525,17 @@ if ($page == 'reports') {
                 closeAssignSubjectsModal();
                 if (data.success) {
                     showSuccessMessage(data.message);
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 1000);
+                    // If opened from teacher modal, refresh it instead of page reload
+                    if (window.currentTeacherId) {
+                        setTimeout(() => {
+                            toggleTeacherDetails(window.currentTeacherId);
+                            window.currentTeacherId = null;
+                        }, 500);
+                    } else {
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 1000);
+                    }
                 } else {
                     showErrorMessage(data.message);
                 }
@@ -15247,7 +15618,9 @@ if ($page == 'reports') {
         }
         
         /* Hide expandable details in print */
-        .teacher-details-row {
+        /* Hide expandable rows when printing */
+        .teacher-details-row,
+        .subject-details-row {
             display: none !important;
         }
         
