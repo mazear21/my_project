@@ -1,0 +1,37 @@
+{
+  "name": "Student Management System",
+  "short_name": "Student Portal",
+  "description": "Comprehensive student management system with multi-language support",
+  "start_url": "/my_project/",
+  "scope": "/my_project/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f8fafc",
+  "theme_color": "#1e3a8a",
+  "dir": "auto",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "photo_2025-11-12_21-42-15.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "photo_2025-11-12_21-42-15.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "photo_2025-11-12_21-42-15.jpg",
+      "sizes": "1280x720",
+      "type": "image/jpeg",
+      "platform": "wide"
+    }
+  ],
+  "categories": ["education", "productivity", "business"],
+  "prefer_related_applications": false
+}

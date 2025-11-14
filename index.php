@@ -2922,11 +2922,45 @@ if ($page == 'reports') {
 <html lang="en" dir="ltr" id="htmlRoot">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
+    
+    <!-- Primary Meta Tags -->
+    <title>Premium Student Management System | Academic Portal</title>
+    <meta name="title" content="Premium Student Management System | Academic Portal">
+    <meta name="description" content="Comprehensive student management system with multi-language support (English, Arabic, Kurdish). Manage students, teachers, subjects, marks, and generate detailed reports.">
+    <meta name="keywords" content="student management, academic portal, education system, school management, university system, grade management, attendance tracking">
+    <meta name="author" content="Academic Management Solutions">
+    <meta name="robots" content="noindex, nofollow">
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="<?php echo (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']; ?>">
+    <meta property="og:title" content="Premium Student Management System">
+    <meta property="og:description" content="Comprehensive student management system with multi-language support. Manage students, teachers, subjects, and generate detailed reports.">
+    <meta property="og:image" content="<?php echo (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST']; ?>/my_project/photo_2025-11-12_21-42-15.jpg">
+    
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="<?php echo (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']; ?>">
+    <meta property="twitter:title" content="Premium Student Management System">
+    <meta property="twitter:description" content="Comprehensive student management system with multi-language support. Manage students, teachers, subjects, and generate detailed reports.">
+    <meta property="twitter:image" content="<?php echo (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST']; ?>/my_project/photo_2025-11-12_21-42-15.jpg">
+    
+    <!-- PWA Support -->
+    <meta name="theme-color" content="#1e3a8a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Student Portal">
+    
     <title>Premium Student Management System</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="photo_2025-11-12_21-42-15.jpg">
+    
     <!-- Professional Fonts for English, Arabic, and Kurdish -->
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;600;700&family=Noto+Sans:wght@300;400;500;600;700&family=Noto+Sans+Arabic:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://unpkg.com/aos@2.3.1/dist/aos.css" rel="stylesheet">
@@ -4922,23 +4956,317 @@ if ($page == 'reports') {
         }
 
         /* ===== RESPONSIVE DESIGN ===== */
-        @media (max-width: 1200px) {
+        
+        /* Large Desktop (1440px+) */
+        @media (min-width: 1440px) {
+            .container { max-width: 1400px; }
+            .kpi-grid { grid-template-columns: repeat(4, 1fr); }
+            .charts-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+        
+        /* Desktop (1200px - 1439px) */
+        @media (max-width: 1439px) {
+            .kpi-grid { grid-template-columns: repeat(3, 1fr); }
             .charts-grid { grid-template-columns: repeat(2, 1fr); }
         }
         
-        @media (max-width: 768px) {
-            .container { padding: 1rem; }
-            .nav-container { padding: 0 1rem; flex-wrap: wrap; }
-            .user-info-section { flex-wrap: wrap; width: 100%; justify-content: center !important; margin-top: 10px; }
-            .current-user { font-size: 12px !important; }
-            .reports-main-content { padding: 1rem; }
-            .dashboard-header { padding: 2rem 1rem 1.5rem; text-align: center; }
-            .dashboard-header h1 { font-size: 1.5rem; }
+        /* Laptop / Small Desktop (1024px - 1199px) */
+        @media (max-width: 1199px) {
+            .container { padding: 1.5rem; }
+            .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 1.25rem; }
+            .charts-grid { grid-template-columns: repeat(2, 1fr); }
+            .dashboard-header h1 { font-size: 2rem; }
+        }
+        
+        /* Tablet Portrait (768px - 1023px) */
+        @media (max-width: 1023px) {
+            .container { padding: 1.25rem; }
+            .nav-container { padding: 0 1rem; }
+            .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 1rem; }
             .charts-grid { grid-template-columns: 1fr; gap: 1rem; }
-            .kpi-grid { grid-template-columns: 1fr; gap: 1rem; }
-            .chart-card { padding: 1rem; margin: 0; }
-            .chart-container { height: 250px; }
-            .filter-sections { grid-template-columns: 1fr; }
+            .dashboard-header { padding: 2rem 1rem 1.5rem; }
+            .dashboard-header h1 { font-size: 1.75rem; }
+            
+            /* Table responsiveness */
+            table { font-size: 0.9rem; }
+            th, td { padding: 0.75rem 0.5rem; }
+            
+            /* Modal adjustments */
+            .modal-content, [style*="max-width: 800px"], [style*="max-width: 700px"], [style*="max-width: 550px"] {
+                max-width: 95% !important;
+                margin: 1rem;
+            }
+        }
+        
+        /* Mobile Landscape & Tablet Portrait (640px - 767px) */
+        @media (max-width: 767px) {
+            .container { padding: 1rem; }
+            .nav-container { 
+                padding: 0.75rem 1rem; 
+                flex-wrap: wrap; 
+                gap: 10px;
+            }
+            
+            .nav-brand { 
+                flex: 1 1 100%; 
+                justify-content: center; 
+                margin-bottom: 0.5rem;
+            }
+            
+            .nav-links {
+                flex: 1 1 auto;
+                justify-content: center;
+                gap: 5px;
+                flex-wrap: wrap;
+            }
+            
+            .nav-container a {
+                padding: 8px 12px;
+                font-size: 0.85rem;
+            }
+            
+            .language-switcher {
+                flex: 1 1 100%;
+                justify-content: center;
+                margin-top: 0.5rem;
+            }
+            
+            .user-info-section { 
+                flex-wrap: wrap; 
+                width: 100%; 
+                justify-content: center !important; 
+                margin-top: 10px;
+                gap: 5px;
+            }
+            
+            .current-user { 
+                font-size: 0.75rem !important; 
+                padding: 6px 12px;
+            }
+            
+            .reports-main-content { padding: 1rem; }
+            .dashboard-header { 
+                padding: 1.5rem 1rem 1rem; 
+                text-align: center; 
+            }
+            .dashboard-header h1 { font-size: 1.5rem; }
+            .dashboard-header p { font-size: 0.9rem; }
+            
+            .kpi-grid { 
+                grid-template-columns: 1fr; 
+                gap: 1rem; 
+            }
+            
+            .kpi-card {
+                padding: 1.25rem;
+            }
+            
+            .charts-grid { 
+                grid-template-columns: 1fr; 
+                gap: 1rem; 
+            }
+            
+            .chart-card { 
+                padding: 1rem; 
+                margin: 0; 
+            }
+            
+            .chart-container { 
+                height: 250px !important; 
+            }
+            
+            .filter-sections { 
+                grid-template-columns: 1fr; 
+                gap: 1rem;
+            }
+            
+            /* Table responsiveness - Enable horizontal scroll */
+            .table-container {
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                margin: 0 -1rem;
+                padding: 0 1rem;
+            }
+            
+            table {
+                font-size: 0.85rem;
+                min-width: 600px;
+            }
+            
+            th, td {
+                padding: 0.65rem 0.4rem;
+                white-space: nowrap;
+            }
+            
+            /* Buttons */
+            .btn, button {
+                padding: 0.5rem 1rem;
+                font-size: 0.85rem;
+            }
+            
+            /* Forms */
+            input, select, textarea {
+                font-size: 0.9rem;
+                padding: 0.65rem;
+            }
+        }
+        
+        /* Mobile Portrait (480px - 639px) */
+        @media (max-width: 639px) {
+            .container { padding: 0.75rem; }
+            
+            .kpi-grid { gap: 0.75rem; }
+            .kpi-card { padding: 1rem; }
+            
+            .kpi-card h4 {
+                font-size: 0.85rem;
+            }
+            
+            .kpi-card .kpi-value {
+                font-size: 1.75rem;
+            }
+            
+            .dashboard-header h1 { font-size: 1.35rem; }
+            .dashboard-header p { font-size: 0.85rem; }
+            
+            .chart-card { padding: 0.75rem; }
+            .chart-title { font-size: 1rem; }
+            
+            /* Stack action buttons vertically */
+            .action-buttons, .button-group {
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+            
+            .action-buttons button, .button-group button {
+                width: 100%;
+            }
+            
+            /* Modal full screen on small devices */
+            [style*="max-width"] {
+                max-width: 100% !important;
+                margin: 0 !important;
+                border-radius: 0 !important;
+                height: 100vh;
+            }
+        }
+        
+        /* Small Mobile (up to 479px) */
+        @media (max-width: 479px) {
+            .container { padding: 0.5rem; }
+            
+            .nav-brand img {
+                width: 50px;
+                height: 50px;
+            }
+            
+            .brand-title { font-size: 1rem; }
+            .brand-subtitle { font-size: 0.7rem; }
+            
+            .nav-container a {
+                padding: 6px 10px;
+                font-size: 0.8rem;
+            }
+            
+            .dashboard-header { padding: 1rem 0.5rem; }
+            .dashboard-header h1 { font-size: 1.2rem; }
+            .dashboard-header p { font-size: 0.8rem; }
+            
+            .kpi-card {
+                padding: 0.75rem;
+            }
+            
+            .kpi-card h4 {
+                font-size: 0.8rem;
+            }
+            
+            .kpi-card .kpi-value {
+                font-size: 1.5rem;
+            }
+            
+            table {
+                font-size: 0.75rem;
+                min-width: 500px;
+            }
+            
+            th, td {
+                padding: 0.5rem 0.3rem;
+            }
+            
+            .chart-container {
+                height: 200px !important;
+            }
+        }
+        
+        /* Landscape orientation optimizations */
+        @media (max-height: 600px) and (orientation: landscape) {
+            .dashboard-header {
+                padding: 1rem;
+            }
+            
+            .dashboard-header h1 {
+                font-size: 1.25rem;
+            }
+            
+            .kpi-card {
+                padding: 0.75rem;
+            }
+            
+            .chart-container {
+                height: 200px !important;
+            }
+            
+            .modal-content {
+                max-height: 90vh;
+                overflow-y: auto;
+            }
+        }
+        
+        /* Print styles */
+        @media print {
+            .nav-container, 
+            .language-switcher, 
+            button, 
+            .action-buttons,
+            .filter-sections,
+            #loadingOverlay {
+                display: none !important;
+            }
+            
+            .container {
+                padding: 0;
+                max-width: 100%;
+            }
+            
+            .chart-card {
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+            
+            table {
+                font-size: 10pt;
+            }
+        }
+        
+        /* Touch device optimizations */
+        @media (hover: none) and (pointer: coarse) {
+            /* Increase touch targets */
+            button, a, input, select {
+                min-height: 44px;
+                min-width: 44px;
+            }
+            
+            /* Remove hover effects on touch devices */
+            *:hover {
+                transition: none;
+            }
+            
+            /* Improve scrolling */
+            .table-container,
+            .chart-card,
+            .modal-content {
+                -webkit-overflow-scrolling: touch;
+            }
         }
     </style>
 </head>
