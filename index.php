@@ -599,17 +599,56 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_teacher') {
     $teacher_id = (int)$_POST['teacher_id'];
     
     if ($teacher_id > 0) {
-        // Delete teacher (assignments will be cascade deleted)
+        // Start transaction
+        pg_query($conn, "BEGIN");
+        
+        // Step 1: Delete teacher (assignments will be cascade deleted due to ON DELETE CASCADE)
         $query = "DELETE FROM teachers WHERE id = $1";
         $result = pg_query_params($conn, $query, array($teacher_id));
         
-        if ($result) {
-            echo json_encode(['success' => true, 'message' => 'Teacher deleted successfully!']);
-            exit;
-        } else {
+        if (!$result) {
+            pg_query($conn, "ROLLBACK");
             echo json_encode(['success' => false, 'message' => 'Error deleting teacher: ' . pg_last_error($conn)]);
             exit;
         }
+        
+        // Step 2: Temporarily drop foreign key constraint
+        pg_query($conn, "ALTER TABLE teacher_subjects DROP CONSTRAINT IF EXISTS teacher_subjects_teacher_id_fkey");
+        
+        // Step 3: Renumber teachers with ID > deleted ID
+        $update_teachers_query = "UPDATE teachers SET id = id - 1 WHERE id > $1";
+        $update_result = pg_query_params($conn, $update_teachers_query, array($teacher_id));
+        
+        if (!$update_result) {
+            pg_query($conn, "ROLLBACK");
+            echo json_encode(['success' => false, 'message' => 'Error renumbering teachers: ' . pg_last_error($conn)]);
+            exit;
+        }
+        
+        // Step 4: Update teacher_subjects references
+        $update_subjects_query = "UPDATE teacher_subjects SET teacher_id = teacher_id - 1 WHERE teacher_id > $1";
+        $update_subjects_result = pg_query_params($conn, $update_subjects_query, array($teacher_id));
+        
+        if (!$update_subjects_result) {
+            pg_query($conn, "ROLLBACK");
+            echo json_encode(['success' => false, 'message' => 'Error renumbering teacher subjects: ' . pg_last_error($conn)]);
+            exit;
+        }
+        
+        // Step 5: Restore foreign key constraint
+        pg_query($conn, "ALTER TABLE teacher_subjects ADD CONSTRAINT teacher_subjects_teacher_id_fkey FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE CASCADE");
+        
+        // Step 6: Reset sequence to MAX(id) + 1
+        $max_id_result = pg_query($conn, "SELECT COALESCE(MAX(id), 0) as max_id FROM teachers");
+        $max_row = pg_fetch_assoc($max_id_result);
+        $next_id = $max_row['max_id'] + 1;
+        pg_query($conn, "ALTER SEQUENCE teachers_id_seq RESTART WITH $next_id");
+        
+        // Commit transaction
+        pg_query($conn, "COMMIT");
+        
+        echo json_encode(['success' => true, 'message' => 'Teacher deleted successfully! IDs renumbered.']);
+        exit;
     }
 }
 
@@ -773,15 +812,29 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_teacher_subjects' && isse
         if ($teacher_result && pg_num_rows($teacher_result) > 0) {
             $teacher = pg_fetch_assoc($teacher_result);
             
-            // Get teacher assignments
-            $assignments_query = "SELECT ts.*, s.subject_name, s.year,
-                                        COUNT(DISTINCT m.student_id) as student_count,
-                                        TO_CHAR(ts.assigned_date, 'Mon DD, YYYY') as assigned_date
+            // Get teacher assignments with class-wise student breakdown
+            $assignments_query = "SELECT ts.id, ts.subject_id, s.subject_name, ts.year, ts.class_level,
+                                        TO_CHAR(ts.assigned_date, 'Mon DD, YYYY') as assigned_date,
+                                        (SELECT json_agg(json_build_object('class', class_breakdown.class_level, 'count', class_breakdown.student_count))
+                                         FROM (
+                                             SELECT st.class_level, COUNT(DISTINCT st.id) as student_count
+                                             FROM students st
+                                             INNER JOIN marks m ON st.id = m.student_id
+                                             WHERE m.subject_id = ts.subject_id 
+                                               AND st.year = ts.year
+                                             GROUP BY st.class_level
+                                             ORDER BY st.class_level
+                                         ) as class_breakdown
+                                        ) as class_breakdown,
+                                        (SELECT COUNT(DISTINCT st.id)
+                                         FROM students st
+                                         INNER JOIN marks m ON st.id = m.student_id
+                                         WHERE m.subject_id = ts.subject_id 
+                                           AND st.year = ts.year
+                                        ) as student_count
                                  FROM teacher_subjects ts
                                  JOIN subjects s ON ts.subject_id = s.id
-                                 LEFT JOIN marks m ON s.id = m.subject_id
                                  WHERE ts.teacher_id = $1
-                                 GROUP BY ts.id, s.subject_name, s.year, ts.year, ts.class_level, ts.assigned_date
                                  ORDER BY ts.year, ts.class_level, s.subject_name";
             $assignments_result = pg_query_params($conn, $assignments_query, array($teacher_id));
             
@@ -966,25 +1019,72 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_student') {
     $student_id = (int)$_POST['student_id'];
     
     if ($student_id > 0) {
-        // First delete all marks for this student
-        $delete_marks_query = "DELETE FROM marks WHERE student_id = $1";
-        pg_query_params($conn, $delete_marks_query, array($student_id));
+        // Start transaction
+        pg_query($conn, "BEGIN");
         
-        // Then delete the student
+        // Step 1: Delete all marks for this student
+        $delete_marks_query = "DELETE FROM marks WHERE student_id = $1";
+        $marks_result = pg_query_params($conn, $delete_marks_query, array($student_id));
+        
+        if (!$marks_result) {
+            pg_query($conn, "ROLLBACK");
+            ob_end_clean();
+            echo "Error deleting marks: " . pg_last_error($conn);
+            exit;
+        }
+        
+        // Step 2: Delete the student
         $delete_student_query = "DELETE FROM students WHERE id = $1";
         $result = pg_query_params($conn, $delete_student_query, array($student_id));
         
-        if ($result) {
-            // Resequence IDs after deletion
-            resequenceTable($conn, 'students');
-            ob_end_clean();
-            echo "Student deleted successfully!";
-            exit;
-        } else {
+        if (!$result) {
+            pg_query($conn, "ROLLBACK");
             ob_end_clean();
             echo "Error deleting student: " . pg_last_error($conn);
             exit;
         }
+        
+        // Step 3: Renumber only students with ID > deleted ID
+        // First, disable foreign key constraint temporarily
+        pg_query($conn, "ALTER TABLE marks DROP CONSTRAINT IF EXISTS marks_student_id_fkey");
+        
+        // Update students table (decrement IDs)
+        $update_students_query = "UPDATE students SET id = id - 1 WHERE id > $1";
+        $update_result = pg_query_params($conn, $update_students_query, array($student_id));
+        
+        if (!$update_result) {
+            pg_query($conn, "ROLLBACK");
+            ob_end_clean();
+            echo "Error renumbering students: " . pg_last_error($conn);
+            exit;
+        }
+        
+        // Update marks table (decrement student_id references)
+        $update_marks_query = "UPDATE marks SET student_id = student_id - 1 WHERE student_id > $1";
+        $update_marks_result = pg_query_params($conn, $update_marks_query, array($student_id));
+        
+        if (!$update_marks_result) {
+            pg_query($conn, "ROLLBACK");
+            ob_end_clean();
+            echo "Error renumbering marks: " . pg_last_error($conn);
+            exit;
+        }
+        
+        // Re-enable foreign key constraint
+        pg_query($conn, "ALTER TABLE marks ADD CONSTRAINT marks_student_id_fkey FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE");
+        
+        // Step 4: Reset sequence to MAX(id) + 1
+        $max_id_result = pg_query($conn, "SELECT COALESCE(MAX(id), 0) as max_id FROM students");
+        $max_row = pg_fetch_assoc($max_id_result);
+        $next_id = $max_row['max_id'] + 1;
+        pg_query($conn, "ALTER SEQUENCE students_id_seq RESTART WITH $next_id");
+        
+        // Commit transaction
+        pg_query($conn, "COMMIT");
+        
+        ob_end_clean();
+        echo "Student deleted successfully! IDs renumbered.";
+        exit;
     } else {
         ob_end_clean();
         echo "Error: Invalid student ID.";
@@ -1439,20 +1539,180 @@ if (isset($_POST['action']) && $_POST['action'] === 'graduate_student') {
     }
 }
 
+// Handle count eligible students
+if (isset($_GET['action']) && $_GET['action'] === 'count_eligible_students') {
+    header('Content-Type: application/json');
+    $year = (int)$_GET['year'];
+    
+    // Get all students of the specified year
+    $students_query = "SELECT id FROM students WHERE year = $1 AND status = 'active'";
+    $students_result = pg_query_params($conn, $students_query, array($year));
+    
+    $total = 0;
+    $eligible = 0;
+    
+    while ($student = pg_fetch_assoc($students_result)) {
+        $student_id = $student['id'];
+        $total++;
+        
+        // Check eligibility based on year
+        if ($year == 1) {
+            $eligibility = checkPromotionEligibility($conn, $student_id);
+        } else {
+            $eligibility = checkGraduationEligibility($conn, $student_id);
+        }
+        
+        if ($eligibility['eligible']) {
+            $eligible++;
+        }
+    }
+    
+    echo json_encode([
+        'success' => true,
+        'year' => $year,
+        'total' => $total,
+        'eligible' => $eligible
+    ]);
+    exit;
+}
+
+// Handle bulk promotion
+if (isset($_POST['action']) && $_POST['action'] === 'bulk_promotion') {
+    header('Content-Type: application/json');
+    $year = (int)$_POST['year'];
+    
+    if ($year !== 1) {
+        echo json_encode(['success' => false, 'message' => 'Bulk promotion is only for Year 1 students.']);
+        exit;
+    }
+    
+    // Get all Year 1 students
+    $students_query = "SELECT id FROM students WHERE year = 1 AND status = 'active'";
+    $students_result = pg_query($conn, $students_query);
+    
+    $promoted = 0;
+    $skipped = 0;
+    $processed = 0;
+    
+    while ($student = pg_fetch_assoc($students_result)) {
+        $student_id = $student['id'];
+        $processed++;
+        
+        // Check promotion eligibility
+        $eligibility = checkPromotionEligibility($conn, $student_id);
+        
+        if ($eligibility['eligible']) {
+            // Promote student
+            $update_query = "UPDATE students SET year = 2 WHERE id = $1";
+            $result = pg_query_params($conn, $update_query, array($student_id));
+            
+            if ($result) {
+                $promoted++;
+            }
+        } else {
+            $skipped++;
+        }
+    }
+    
+    echo json_encode([
+        'success' => true,
+        'processed' => $processed,
+        'promoted' => $promoted,
+        'skipped' => $skipped
+    ]);
+    exit;
+}
+
+// Handle bulk graduation
+if (isset($_POST['action']) && $_POST['action'] === 'bulk_graduation') {
+    header('Content-Type: application/json');
+    $year = (int)$_POST['year'];
+    
+    if ($year !== 2) {
+        echo json_encode(['success' => false, 'message' => 'Bulk graduation is only for Year 2 students.']);
+        exit;
+    }
+    
+    // Get all Year 2 students
+    $students_query = "SELECT * FROM students WHERE year = 2 AND status = 'active'";
+    $students_result = pg_query($conn, $students_query);
+    
+    $graduated = 0;
+    $skipped = 0;
+    $processed = 0;
+    
+    while ($student = pg_fetch_assoc($students_result)) {
+        $student_id = $student['id'];
+        $processed++;
+        
+        // Check graduation eligibility
+        $eligibility = checkGraduationEligibility($conn, $student_id);
+        
+        if ($eligibility['eligible']) {
+            // Calculate graduation grade
+            $graduation_data = calculateGraduationGrade($conn, $student_id);
+            $graduation_grade = $graduation_data['graduation_grade'];
+            
+            // Insert into graduated_students
+            $graduate_query = "INSERT INTO graduated_students (student_id, student_name, age, gender, class_level, phone, graduation_date, final_year, graduation_grade) 
+                              VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE, 2, $7)";
+            $graduate_result = pg_query_params($conn, $graduate_query, array(
+                $student['id'], $student['name'], $student['age'], $student['gender'], 
+                $student['class_level'], $student['phone'], $graduation_grade
+            ));
+            
+            if ($graduate_result) {
+                // Update student status
+                pg_query_params($conn, "UPDATE students SET status = 'graduated' WHERE id = $1", array($student_id));
+                $graduated++;
+            }
+        } else {
+            $skipped++;
+        }
+    }
+    
+    echo json_encode([
+        'success' => true,
+        'processed' => $processed,
+        'graduated' => $graduated,
+        'skipped' => $skipped
+    ]);
+    exit;
+}
+
 // Handle graduated student deletion
 if (isset($_POST['action']) && $_POST['action'] === 'delete_graduated_student') {
-    $graduated_id = $_POST['graduated_id'];
+    $graduated_id = (int)$_POST['graduated_id'];
     
-    if ($graduated_id) {
+    if ($graduated_id > 0) {
+        // Start transaction
+        pg_query($conn, "BEGIN");
+        
+        // Delete the graduated student
         $delete_query = "DELETE FROM graduated_students WHERE id = $1";
         $result = pg_query_params($conn, $delete_query, array($graduated_id));
         
-        if ($result) {
-            // Resequence IDs after deletion
-            resequenceTable($conn, 'graduated_students');
-            $success_message = "Graduated student deleted successfully!";
-        } else {
+        if (!$result) {
+            pg_query($conn, "ROLLBACK");
             $error_message = "Error deleting graduated student: " . pg_last_error($conn);
+        } else {
+            // Renumber only graduated students with ID > deleted ID
+            $update_query = "UPDATE graduated_students SET id = id - 1 WHERE id > $1";
+            $update_result = pg_query_params($conn, $update_query, array($graduated_id));
+            
+            if (!$update_result) {
+                pg_query($conn, "ROLLBACK");
+                $error_message = "Error renumbering graduated students: " . pg_last_error($conn);
+            } else {
+                // Reset sequence to MAX(id) + 1
+                $max_id_result = pg_query($conn, "SELECT COALESCE(MAX(id), 0) as max_id FROM graduated_students");
+                $max_row = pg_fetch_assoc($max_id_result);
+                $next_id = $max_row['max_id'] + 1;
+                pg_query($conn, "ALTER SEQUENCE graduated_students_id_seq RESTART WITH $next_id");
+                
+                pg_query($conn, "COMMIT");
+                $success_message = "Graduated student deleted successfully! IDs renumbered.";
+            }
         }
     }
 }
@@ -1460,18 +1720,42 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_graduated_student') 
 // Handle bulk deletion of graduated students
 if (isset($_POST['action']) && $_POST['action'] === 'bulk_delete_graduated') {
     if (isset($_POST['selected_graduates']) && is_array($_POST['selected_graduates'])) {
-        $selected_ids = $_POST['selected_graduates'];
-        $placeholders = implode(',', array_map(function($i) { return '$' . ($i + 1); }, array_keys($selected_ids)));
+        $selected_ids = array_map('intval', $_POST['selected_graduates']);
+        sort($selected_ids); // Sort to delete from lowest to highest
         
-        $delete_query = "DELETE FROM graduated_students WHERE id IN ($placeholders)";
-        $result = pg_query_params($conn, $delete_query, $selected_ids);
+        pg_query($conn, "BEGIN");
         
-        if ($result) {
-            // Resequence IDs after deletion
-            resequenceTable($conn, 'graduated_students');
-            $success_message = count($selected_ids) . " graduated students deleted successfully!";
-        } else {
-            $error_message = "Error deleting graduated students: " . pg_last_error($conn);
+        $deleted_count = 0;
+        // Delete one by one and renumber after each deletion
+        foreach ($selected_ids as $index => $graduated_id) {
+            // Adjust ID based on how many we've already deleted
+            $adjusted_id = $graduated_id - $deleted_count;
+            
+            $delete_query = "DELETE FROM graduated_students WHERE id = $1";
+            $result = pg_query_params($conn, $delete_query, array($adjusted_id));
+            
+            if (!$result) {
+                pg_query($conn, "ROLLBACK");
+                $error_message = "Error deleting graduated students: " . pg_last_error($conn);
+                break;
+            }
+            
+            // Renumber IDs greater than the deleted one
+            $update_query = "UPDATE graduated_students SET id = id - 1 WHERE id > $1";
+            pg_query_params($conn, $update_query, array($adjusted_id));
+            
+            $deleted_count++;
+        }
+        
+        if (!isset($error_message)) {
+            // Reset sequence
+            $max_id_result = pg_query($conn, "SELECT COALESCE(MAX(id), 0) as max_id FROM graduated_students");
+            $max_row = pg_fetch_assoc($max_id_result);
+            $next_id = $max_row['max_id'] + 1;
+            pg_query($conn, "ALTER SEQUENCE graduated_students_id_seq RESTART WITH $next_id");
+            
+            pg_query($conn, "COMMIT");
+            $success_message = "$deleted_count graduated students deleted successfully! IDs renumbered.";
         }
     } else {
         $error_message = "No students selected for deletion.";
@@ -2399,11 +2683,19 @@ function checkPromotionEligibility($conn, $student_id) {
         $reasons = [];
         
         if (!$has_minimum_grade) {
-            $reasons[] = "Total Final Grade: " . round($total_final_grade, 2) . "/50 (Required: ≥25)";
+            $reasons[] = [
+                'type' => 'total_grade',
+                'grade' => round($total_final_grade, 2),
+                'max' => 50,
+                'required' => 25
+            ];
         }
         
         if (!$has_no_failed_subjects) {
-            $reasons[] = "Failed Subjects: " . count($failed_subjects);
+            $reasons[] = [
+                'type' => 'failed_subjects',
+                'count' => count($failed_subjects)
+            ];
         }
         
         return [
@@ -2508,11 +2800,19 @@ function checkGraduationEligibility($conn, $student_id) {
         $reasons = [];
         
         if (!$has_minimum_grade) {
-            $reasons[] = "Total Final Grade: " . round($total_final_grade, 2) . "/50 (Required: ≥25)";
+            $reasons[] = [
+                'type' => 'total_grade',
+                'grade' => round($total_final_grade, 2),
+                'max' => 50,
+                'required' => 25
+            ];
         }
         
         if (!$has_no_failed_subjects) {
-            $reasons[] = "Failed Subjects: " . count($failed_subjects);
+            $reasons[] = [
+                'type' => 'failed_subjects',
+                'count' => count($failed_subjects)
+            ];
         }
         
         return [
@@ -3548,42 +3848,51 @@ if ($page == 'reports') {
         .formal-schedule {
             width: 100%;
             border-collapse: collapse;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             border: 2px solid var(--border-color);
             background: white;
+            table-layout: fixed;
         }
 
         .formal-schedule th {
-            padding: 12px 8px;
+            padding: 8px 6px;
             text-align: center;
             border: 1px solid var(--border-color);
             background: #f8f9fa;
             color: var(--text-color);
             font-weight: 700;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.3px;
+        }
+
+        .formal-schedule th:first-child {
+            width: 100px;
         }
 
         .formal-schedule td {
-            padding: 12px 8px;
+            padding: 8px 6px;
             text-align: center;
             border: 1px solid var(--border-color);
             vertical-align: middle;
             font-weight: 500;
         }
 
+        .formal-schedule td:first-child {
+            width: 100px;
+            font-weight: 600;
+        }
+
         .time-period {
             background: #e8f4fd !important;
             font-weight: 700;
             color: #1565c0;
-            min-width: 120px;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
         }
 
         .subject-cell {
             font-weight: 500;
-            font-size: 0.88rem;
+            font-size: 0.82rem;
             color: #333;
         }
 
@@ -3963,13 +4272,14 @@ if ($page == 'reports') {
             width: 100%;
             border-collapse: collapse;
             font-size: 0.9rem;
-            table-layout: auto;
+            table-layout: fixed;
         }
 
         th, td {
-            padding: 0.75rem 1rem;
+            padding: 0.875rem 1rem;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
+            vertical-align: middle;
         }
 
         th {
@@ -3984,15 +4294,28 @@ if ($page == 'reports') {
             z-index: 10;
         }
         
+        /* Students Table Column Widths for Perfect Alignment */
+        #studentsTable th:nth-child(1), #studentsTable td:nth-child(1) { width: 50px; text-align: center; }
+        #studentsTable th:nth-child(2), #studentsTable td:nth-child(2) { width: 150px; }
+        #studentsTable th:nth-child(3), #studentsTable td:nth-child(3) { width: 60px; text-align: center; }
+        #studentsTable th:nth-child(4), #studentsTable td:nth-child(4) { width: 100px; text-align: center; }
+        #studentsTable th:nth-child(5), #studentsTable td:nth-child(5) { width: 100px; text-align: center; }
+        #studentsTable th:nth-child(6), #studentsTable td:nth-child(6) { width: 120px; text-align: center; }
+        #studentsTable th:nth-child(7), #studentsTable td:nth-child(7) { width: 110px; }
+        #studentsTable th:nth-child(8), #studentsTable td:nth-child(8) { width: auto; }
+        #studentsTable th:nth-child(9), #studentsTable td:nth-child(9) { width: 150px; }
+        
         /* Action buttons alignment */
-        #studentsTable td:nth-child(10) {
+        #studentsTable td:nth-child(9) {
             display: flex;
             flex-direction: column;
             gap: 6px;
             align-items: stretch;
+            padding-top: 0.5rem;
+            padding-bottom: 0.5rem;
         }
         
-        #studentsTable td:nth-child(10) button {
+        #studentsTable td:nth-child(9) button {
             width: 100%;
             margin: 0 !important;
         }
@@ -4010,9 +4333,30 @@ if ($page == 'reports') {
         }
 
         /* Teachers Table Specific Styling */
+        #teachersTable {
+            table-layout: fixed;
+        }
+        
         #teachersTable th {
             text-align: center;
             vertical-align: middle;
+        }
+        
+        /* Email column - fixed width with ellipsis */
+        #teachersTable th:nth-child(3),
+        #teachersTable td:nth-child(3) {
+            width: 180px;
+            max-width: 180px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        /* Phone column - fixed width */
+        #teachersTable th:nth-child(4),
+        #teachersTable td:nth-child(4) {
+            width: 130px;
+            max-width: 130px;
         }
 
         #teachersTable th:nth-child(2),
@@ -4028,7 +4372,23 @@ if ($page == 'reports') {
         #teachersTable td:nth-child(3) {
             text-align: left;
         }
-
+        
+        /* Teacher Access/Credential Table Specific Styling */
+        #teacherAccessTable {
+            table-layout: fixed;
+        }
+        
+        /* Email column in Teacher Access table - fixed width with ellipsis */
+        #teacherAccessTable th:nth-child(3),
+        #teacherAccessTable td:nth-child(3) {
+            width: 200px;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-align: left;
+        }
+        
         tr:hover {
             background: var(--hover-color);
         }
@@ -4298,6 +4658,189 @@ if ($page == 'reports') {
             }
         }
 
+        /* Advanced Loader Styles */
+        .loader {
+            width: 6em;
+            height: 6em;
+            margin: 0 auto 1rem;
+        }
+
+        .loader-ring {
+            animation: ringA 2s linear infinite;
+        }
+
+        .loader-ring-a {
+            stroke: #1e3a8a;
+        }
+
+        .loader-ring-b {
+            animation-name: ringB;
+            stroke: #1e40af;
+        }
+
+        .loader-ring-c {
+            animation-name: ringC;
+            stroke: #2563eb;
+        }
+
+        .loader-ring-d {
+            animation-name: ringD;
+            stroke: #1e40af;
+        }
+
+        /* Ring Animations */
+        @keyframes ringA {
+            from, 4% {
+                stroke-dasharray: 0 660;
+                stroke-width: 8;
+                stroke-dashoffset: -330;
+            }
+            12% {
+                stroke-dasharray: 60 600;
+                stroke-width: 12;
+                stroke-dashoffset: -335;
+            }
+            32% {
+                stroke-dasharray: 60 600;
+                stroke-width: 12;
+                stroke-dashoffset: -595;
+            }
+            40%, 54% {
+                stroke-dasharray: 0 660;
+                stroke-width: 8;
+                stroke-dashoffset: -660;
+            }
+            62% {
+                stroke-dasharray: 60 600;
+                stroke-width: 12;
+                stroke-dashoffset: -665;
+            }
+            82% {
+                stroke-dasharray: 60 600;
+                stroke-width: 12;
+                stroke-dashoffset: -925;
+            }
+            90%, to {
+                stroke-dasharray: 0 660;
+                stroke-width: 8;
+                stroke-dashoffset: -990;
+            }
+        }
+
+        @keyframes ringB {
+            from, 12% {
+                stroke-dasharray: 0 220;
+                stroke-width: 8;
+                stroke-dashoffset: -110;
+            }
+            20% {
+                stroke-dasharray: 20 200;
+                stroke-width: 12;
+                stroke-dashoffset: -115;
+            }
+            40% {
+                stroke-dasharray: 20 200;
+                stroke-width: 12;
+                stroke-dashoffset: -195;
+            }
+            48%, 62% {
+                stroke-dasharray: 0 220;
+                stroke-width: 8;
+                stroke-dashoffset: -220;
+            }
+            70% {
+                stroke-dasharray: 20 200;
+                stroke-width: 12;
+                stroke-dashoffset: -225;
+            }
+            90% {
+                stroke-dasharray: 20 200;
+                stroke-width: 12;
+                stroke-dashoffset: -305;
+            }
+            98%, to {
+                stroke-dasharray: 0 220;
+                stroke-width: 8;
+                stroke-dashoffset: -330;
+            }
+        }
+
+        @keyframes ringC {
+            from {
+                stroke-dasharray: 0 440;
+                stroke-width: 8;
+                stroke-dashoffset: 0;
+            }
+            8% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -5;
+            }
+            28% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -175;
+            }
+            36%, 58% {
+                stroke-dasharray: 0 440;
+                stroke-width: 8;
+                stroke-dashoffset: -220;
+            }
+            66% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -225;
+            }
+            86% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -395;
+            }
+            94%, to {
+                stroke-dasharray: 0 440;
+                stroke-width: 8;
+                stroke-dashoffset: -440;
+            }
+        }
+
+        @keyframes ringD {
+            from, 8% {
+                stroke-dasharray: 0 440;
+                stroke-width: 8;
+                stroke-dashoffset: 0;
+            }
+            16% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -5;
+            }
+            36% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -175;
+            }
+            44%, 50% {
+                stroke-dasharray: 0 440;
+                stroke-width: 8;
+                stroke-dashoffset: -220;
+            }
+            58% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -225;
+            }
+            78% {
+                stroke-dasharray: 40 400;
+                stroke-width: 12;
+                stroke-dashoffset: -395;
+            }
+            86%, to {
+                stroke-dasharray: 0 440;
+                stroke-width: 8;
+                stroke-dashoffset: -440;
+            }
+        }
+
         .loading-spinner {
             width: 50px;
             height: 50px;
@@ -4403,7 +4946,12 @@ if ($page == 'reports') {
     <!-- Loading Overlay -->
     <div id="loadingOverlay" class="loading-overlay">
         <div class="loading-content">
-            <div class="loading-spinner"></div>
+            <svg class="loader" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <circle class="loader-ring loader-ring-a" cx="50" cy="50" r="45" fill="none" stroke-width="4" stroke-linecap="round"></circle>
+                <circle class="loader-ring loader-ring-b" cx="50" cy="50" r="35" fill="none" stroke-width="4" stroke-linecap="round"></circle>
+                <circle class="loader-ring loader-ring-c" cx="50" cy="50" r="25" fill="none" stroke-width="4" stroke-linecap="round"></circle>
+                <circle class="loader-ring loader-ring-d" cx="50" cy="50" r="15" fill="none" stroke-width="4" stroke-linecap="round"></circle>
+            </svg>
             <div class="loading-text">Processing<span class="loading-dots"></span></div>
             <div class="loading-subtext">Please wait while we update your data</div>
         </div>
@@ -4437,11 +4985,11 @@ if ($page == 'reports') {
             <div class="user-info-section">
                 <div class="current-user" style="display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: rgba(255,255,255,0.1); border-radius: 8px;">
                     <div style="display: flex; flex-direction: column; align-items: flex-start;">
-                        <span style="font-size: 11px; opacity: 0.8;"><?= isAdmin() ? 'Administrator' : 'Teacher' ?></span>
-                        <span style="font-weight: 600; font-size: 13px;"><?= htmlspecialchars($_SESSION['full_name']) ?></span>
+                        <span style="font-size: 11px; opacity: 0.8; color: white;" data-translate="<?= isAdmin() ? 'administrator' : 'teacher' ?>"><?= isAdmin() ? 'Administrator' : 'Teacher' ?></span>
+                        <span style="font-weight: 600; font-size: 13px; color: white;"><?= htmlspecialchars($_SESSION['full_name']) ?></span>
                     </div>
                 </div>
-                <a href="logout.php" style="padding: 8px 14px; background: rgba(255,255,255,0.2); border-radius: 8px; text-decoration: none; color: white; font-weight: 500; font-size: 13px; transition: all 0.3s; border: 1px solid rgba(255,255,255,0.3);" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                <a href="logout.php" style="padding: 8px 14px; background: rgba(255,255,255,0.2); border-radius: 8px; text-decoration: none; color: white; font-weight: 500; font-size: 13px; transition: all 0.3s; border: 1px solid rgba(255,255,255,0.3);" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'" data-translate="logout">
                     Logout
                 </a>
                 <div class="language-switcher">
@@ -4665,26 +5213,52 @@ if ($page == 'reports') {
                                         ", [$teacher_id, $subj['id']]);
                                         $assigned_year = pg_fetch_result($assignment, 0, 0);
                                         
-                                        $student_count_subj = pg_query_params($conn, "
-                                            SELECT COUNT(DISTINCT m.student_id) as count
-                                            FROM marks m
-                                            JOIN students st ON m.student_id = st.id
+                                        // Get class breakdown for this subject
+                                        $class_breakdown_query = pg_query_params($conn, "
+                                            SELECT st.class_level, COUNT(DISTINCT st.id) as count
+                                            FROM students st
+                                            INNER JOIN marks m ON st.id = m.student_id
                                             WHERE m.subject_id = $1 
                                             AND st.status = 'active'
                                             AND st.year = $2
+                                            GROUP BY st.class_level
+                                            ORDER BY st.class_level
                                         ", [$subj['id'], $assigned_year]);
-                                        $subj_students = pg_fetch_result($student_count_subj, 0, 0);
+                                        
+                                        $class_breakdown = [];
+                                        $total_students = 0;
+                                        while ($class_row = pg_fetch_assoc($class_breakdown_query)) {
+                                            $class_breakdown[] = $class_row;
+                                            $total_students += (int)$class_row['count'];
+                                        }
                                 ?>
                                     <div style="background: #f8fafc; border-left: 4px solid var(--primary-color); padding: 15px; margin-bottom: 12px; border-radius: 6px;">
-                                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                                            <div>
-                                                <h4 style="margin: 0 0 5px 0; color: #1e293b; font-size: 15px;"><?= htmlspecialchars($subj['subject_name']) ?></h4>
-                                                <p style="margin: 0; color: #64748b; font-size: 13px;">
-                                                    <i class="fas fa-graduation-cap"></i> <span data-translate="year">Year</span> <?= $subj['year'] ?> | 
-                                                    <i class="fas fa-users"></i> <?= $subj_students ?> <span data-translate="students_label">Students</span>
-                                                </p>
+                                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 15px;">
+                                            <div style="flex: 1;">
+                                                <h4 style="margin: 0 0 8px 0; color: #1e293b; font-size: 15px; font-weight: 700;"><?= htmlspecialchars($subj['subject_name']) ?></h4>
+                                                <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                                                    <span style="padding: 4px 10px; background: #1e3a8a; color: white; border-radius: 4px; font-size: 12px; font-weight: 600;">
+                                                        <i class="fas fa-calendar-alt"></i> <span data-translate="year">Year</span> <?= $subj['year'] ?>
+                                                    </span>
+                                                    <?php if (count($class_breakdown) > 0): ?>
+                                                        <?php foreach ($class_breakdown as $class_info): ?>
+                                                            <span style="padding: 4px 10px; background: #2563eb; color: white; border-radius: 4px; font-size: 12px; font-weight: 600;">
+                                                                <i class="fas fa-door-open"></i> <span data-translate="class">Class</span> <?= htmlspecialchars($class_info['class_level']) ?>: <?= $class_info['count'] ?> <span data-translate="students">Students</span>
+                                                            </span>
+                                                        <?php endforeach; ?>
+                                                        <?php if (count($class_breakdown) > 1): ?>
+                                                            <span style="padding: 4px 10px; background: #3b82f6; color: white; border-radius: 4px; font-size: 12px; font-weight: 600;">
+                                                                <i class="fas fa-users"></i> <span data-translate="total">Total</span>: <?= $total_students ?> <span data-translate="students">Students</span>
+                                                            </span>
+                                                        <?php endif; ?>
+                                                    <?php else: ?>
+                                                        <span style="padding: 4px 10px; background: #94a3b8; color: white; border-radius: 4px; font-size: 12px; font-weight: 600;">
+                                                            <i class="fas fa-users"></i> 0 <span data-translate="students">Students</span>
+                                                        </span>
+                                                    <?php endif; ?>
+                                                </div>
                                             </div>
-                                            <a href="?page=marks&subject=<?= $subj['id'] ?>" style="padding: 8px 16px; background: var(--primary-color); color: white; text-decoration: none; border-radius: 5px; font-size: 13px; font-weight: 600;">
+                                            <a href="?page=marks&subject=<?= $subj['id'] ?>" style="padding: 8px 16px; background: var(--primary-color); color: white; text-decoration: none; border-radius: 5px; font-size: 13px; font-weight: 600; white-space: nowrap;">
                                                 <span data-translate="view_marks">View Marks</span>
                                             </a>
                                         </div>
@@ -4703,7 +5277,7 @@ if ($page == 'reports') {
                     <div class="chart-card" style="margin-top: 30px;">
                         <h3 class="chart-title" style="display: flex; align-items: center; gap: 10px;">
                             <i class="fas fa-tasks" style="color: var(--primary-color);"></i>
-                            My Tasks & Schedule
+                            <span data-translate="my_tasks_schedule">My Tasks & Schedule</span>
                         </h3>
                         <div id="tasksList" style="padding: 20px;">
                             <?php if (pg_num_rows($tasks_result) > 0): ?>
@@ -4774,7 +5348,7 @@ if ($page == 'reports') {
                             <?php else: ?>
                                 <p style="text-align: center; color: #94a3b8; padding: 40px;">
                                     <i class="fas fa-inbox" style="font-size: 48px; display: block; margin-bottom: 15px; opacity: 0.5;"></i>
-                                    No tasks yet. Create your first task above to get started.
+                                    <span data-translate="no_tasks_yet">No tasks yet. Create your first task above to get started.</span>
                                 </p>
                             <?php endif; ?>
                         </div>
@@ -5137,7 +5711,7 @@ if ($page == 'reports') {
                                 'Monday' => [
                                     ['08:30 - 10:00', 'Computer Essentials'],
                                     ['10:00 - 10:20', 'Break'],
-                                    ['10:20 - 11:50', 'Music'],
+                                    ['10:20 - 11:50', 'MIS'],
                                     ['11:50 - 12:00', 'Break'],
                                     ['12:00 - 01:30', 'Basic C++']
                                 ],
@@ -5149,7 +5723,7 @@ if ($page == 'reports') {
                                     ['12:00 - 01:30', 'Computer Essentials']
                                 ],
                                 'Wednesday' => [
-                                    ['08:30 - 10:00', 'Music'],
+                                    ['08:30 - 10:00', 'MIS'],
                                     ['10:00 - 10:15', 'Break'],
                                     ['10:15 - 11:45', 'Basic C++'],
                                     ['11:45 - 12:00', 'Break'],
@@ -5167,7 +5741,7 @@ if ($page == 'reports') {
                                     ['10:00 - 10:20', 'Break'],
                                     ['10:20 - 11:50', 'Basic C++'],
                                     ['11:50 - 12:10', 'Break'],
-                                    ['12:10 - 01:40', 'Music']
+                                    ['12:10 - 01:40', 'MIS']
                                 ],
                                 'Monday' => [
                                     ['08:30 - 10:00', 'English'],
@@ -5177,7 +5751,7 @@ if ($page == 'reports') {
                                     ['12:00 - 01:30', 'Basics of Principle Statistics']
                                 ],
                                 'Tuesday' => [
-                                    ['08:30 - 10:00', 'Music'],
+                                    ['08:30 - 10:00', 'MIS'],
                                     ['10:00 - 10:20', 'Break'],
                                     ['10:20 - 11:50', 'Basic C++'],
                                     ['11:50 - 12:00', 'Break'],
@@ -5188,7 +5762,7 @@ if ($page == 'reports') {
                                     ['10:00 - 10:15', 'Break'],
                                     ['10:15 - 11:45', 'Basics of Principle Statistics'],
                                     ['11:45 - 12:00', 'Break'],
-                                    ['12:00 - 01:30', 'Music']
+                                    ['12:00 - 01:30', 'MIS']
                                 ],
                                 'Thursday' => [
                                     ['08:30 - 10:00', 'Basic C++'],
@@ -5200,7 +5774,7 @@ if ($page == 'reports') {
                                 'Sunday' => [
                                     ['08:30 - 10:00', 'Computer Essentials'],
                                     ['10:00 - 10:15', 'Break'],
-                                    ['10:15 - 11:45', 'Music'],
+                                    ['10:15 - 11:45', 'MIS'],
                                     ['11:45 - 12:00', 'Break'],
                                     ['12:00 - 01:30', 'Basics of Principle Statistics']
                                 ],
@@ -5214,7 +5788,7 @@ if ($page == 'reports') {
                                 'Tuesday' => [
                                     ['08:30 - 10:00', 'Basics of Principle Statistics'],
                                     ['10:00 - 10:10', 'Break'],
-                                    ['10:10 - 11:40', 'Music'],
+                                    ['10:10 - 11:40', 'MIS'],
                                     ['11:40 - 12:00', 'Break'],
                                     ['12:00 - 01:30', 'Basic C++']
                                 ],
@@ -5226,7 +5800,7 @@ if ($page == 'reports') {
                                     ['12:00 - 01:30', 'Basics of Principle Statistics']
                                 ],
                                 'Thursday' => [
-                                    ['08:30 - 10:00', 'Music'],
+                                    ['08:30 - 10:00', 'MIS'],
                                     ['10:00 - 10:20', 'Break'],
                                     ['10:20 - 11:50', 'Basic C++']
                                 ]
@@ -5351,7 +5925,7 @@ if ($page == 'reports') {
                         if (strpos($subject_lower, 'web') !== false || strpos($subject_lower, 'development') !== false) return 'subject-math';
                         if (strpos($subject_lower, 'statistics') !== false || strpos($subject_lower, 'principle') !== false || strpos($subject_lower, 'mathematics') !== false) return 'subject-math';
                         if (strpos($subject_lower, 'computer') !== false || strpos($subject_lower, 'essentials') !== false || strpos($subject_lower, 'intro') !== false) return 'subject-computer';
-                        if (strpos($subject_lower, 'music') !== false) return 'subject-history';
+                        if (strpos($subject_lower, 'mis') !== false) return 'subject-history';
                         return 'subject-cell';
                     }
                     
@@ -5934,6 +6508,11 @@ if ($page == 'reports') {
                                         🔄 Clear Filters
                                     </button>
                                 </div>
+                                <div class="filter-section">
+                                    <button class="apply-filters-btn" onclick="showBulkActionModal()" style="margin-top: 1.5rem; background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%);" data-translate="bulk_promote_graduate">
+                                        <i class="fas fa-users-cog"></i> Bulk Promote/Graduate
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
@@ -5946,8 +6525,7 @@ if ($page == 'reports') {
                                         <th data-translate="age">Age</th>
                                         <th data-translate="gender">Gender</th>
                                         <th data-translate="class">Class</th>
-                                        <th data-translate="academic_year">Year</th>
-                                        <th data-translate="status">Status</th>
+                                        <th data-translate="academic_year">Academic Year</th>
                                         <th data-translate="phone">Phone</th>
                                         <th data-translate="subjects">Subjects</th>
                                         <th data-translate="actions">Actions</th>
@@ -5970,58 +6548,43 @@ if ($page == 'reports') {
                                     
                                     if ($students_result && pg_num_rows($students_result) > 0):
                                         while($student = pg_fetch_assoc($students_result)):
+                                            // Check eligibility for promotion or graduation
+                                            $eligibility = null;
+                                            if ($student['year'] == 1) {
+                                                $eligibility = checkPromotionEligibility($conn, $student['id']);
+                                            } elseif ($student['year'] == 2) {
+                                                $eligibility = checkGraduationEligibility($conn, $student['id']);
+                                            }
+                                            $is_eligible = $eligibility && $eligibility['eligible'];
                                     ?>
                                     <tr>
                                         <td><?= $student['id'] ?></td>
                                         <td><?= htmlspecialchars($student['name']) ?></td>
                                         <td><?= $student['age'] ?? 'N/A' ?></td>
                                         <td>
-                                            <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; 
+                                            <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
                                                          background: <?= $student['gender'] == 'Male' ? '#e3f2fd' : '#fce4ec' ?>; 
-                                                         color: <?= $student['gender'] == 'Male' ? '#1565c0' : '#c2185b' ?>; 
-                                                         display: inline-block; min-width: 60px; text-align: center;">
+                                                         color: <?= $student['gender'] == 'Male' ? '#1565c0' : '#c2185b' ?>;">
                                                 <span data-translate="<?= strtolower($student['gender'] ?? 'n_a') ?>"><?= $student['gender'] ?? 'N/A' ?></span>
                                             </span>
                                         </td>
                                         <td>
                                             <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
-                                                         background: var(--primary-light); color: var(--primary-color);
-                                                         display: inline-block; min-width: 70px; text-align: center;">
+                                                         background: var(--primary-light); color: var(--primary-color);">
                                                 Class <?= htmlspecialchars($student['class_level']) ?>
                                             </span>
                                         </td>
                                         <td>
-                                            <span style="padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
-                                                         background: #f5f5f5; color: #000000;
-                                                         display: inline-block; min-width: 60px; text-align: center; border: 1px solid #e0e0e0;">
-                                                Year <?= $student['year'] ?? 'N/A' ?>
+                                            <span style="padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+                                                         background: <?= $student['year'] == 1 ? '#E0F2FE' : '#FEF3C7' ?>; 
+                                                         color: <?= $student['year'] == 1 ? '#0284C7' : '#D97706' ?>;">
+                                                <span data-translate="<?= $student['year'] == 1 ? 'year_1' : 'year_2' ?>">Year <?= $student['year'] ?? 'N/A' ?></span>
                                             </span>
-                                        </td>
-                                        <td>
-                                            <?php if ($student['year'] == 1): ?>
-                                                <span style="padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
-                                                             background: #E0F2FE; color: #0284C7;
-                                                             display: inline-block; min-width: 100px; text-align: center;">
-                                                    <span data-translate="year_1_student">Year 1 Student</span>
-                                                </span>
-                                            <?php elseif ($student['year'] == 2): ?>
-                                                <span style="padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
-                                                             background: #FEF3C7; color: #D97706;
-                                                             display: inline-block; min-width: 100px; text-align: center;">
-                                                    <span data-translate="year_2_student">Year 2 Student</span>
-                                                </span>
-                                            <?php else: ?>
-                                                <span style="padding: 6px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600;
-                                                             background: #F3F4F6; color: #6B7280;
-                                                             display: inline-block; min-width: 100px; text-align: center;">
-                                                    <span data-translate="unknown">Unknown</span>
-                                                </span>
-                                            <?php endif; ?>
                                         </td>
                                         <td><?= htmlspecialchars($student['phone'] ?? '') ?></td>
                                         <td>
                                             <?php if (!empty($student['enrolled_subjects'])): ?>
-                                                <div style="display: flex; flex-wrap: wrap; gap: 4px; max-width: 300px;">
+                                                <div style="display: flex; flex-wrap: wrap; gap: 4px;">
                                                     <?php 
                                                     $subjects = explode(', ', $student['enrolled_subjects']);
                                                     foreach ($subjects as $subject): 
@@ -6044,10 +6607,14 @@ if ($page == 'reports') {
                                             
                                             <?php if ($student['year'] == 1): ?>
                                                 <button class="export-btn" onclick="handleStudentAction('promote_student', <?= $student['id'] ?>)" 
-                                                        style="background: #10B981; color: white;" data-translate="promote">Promote</button>
+                                                        style="background: <?= $is_eligible ? '#10B981' : '#F59E0B' ?>; color: white;" 
+                                                        title="<?= $is_eligible ? 'Eligible for promotion' : 'Not eligible for promotion' ?>" 
+                                                        data-translate="promote">Promote</button>
                                             <?php elseif ($student['year'] == 2): ?>
                                                 <button class="export-btn" onclick="graduateStudent(<?= $student['id'] ?>)" 
-                                                        style="background: #F59E0B; color: white;" data-translate="graduate">Graduate</button>
+                                                        style="background: <?= $is_eligible ? '#10B981' : '#F59E0B' ?>; color: white;" 
+                                                        title="<?= $is_eligible ? 'Eligible for graduation' : 'Not eligible for graduation' ?>" 
+                                                        data-translate="graduate">Graduate</button>
                                             <?php endif; ?>
                                         </td>
                                     </tr>
@@ -6383,38 +6950,66 @@ if ($page == 'reports') {
             </div>
 
             <!-- Credential Modal -->
-            <div id="credentialModal" class="modal" style="display: none;">
-                <div class="modal-content" style="max-width: 500px;">
-                    <div class="modal-header">
-                        <h3 id="modalTitle" data-translate="create_teacher_access">Create Teacher Access</h3>
-                        <span class="close" onclick="closeCredentialModal()">&times;</span>
+            <div id="credentialModal" onclick="if(event.target.id === 'credentialModal') closeCredentialModal()" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; align-items: center; justify-content: center; padding: 1rem;">
+                <div onclick="event.stopPropagation()" style="background: white; border-radius: 12px; max-width: 550px; width: 100%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+                    <!-- Header -->
+                    <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; display: flex; align-items: center; justify-content: space-between; border-radius: 12px 12px 0 0;">
+                        <h3 id="modalTitle" style="margin: 0; color: white; font-size: 1.3rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem;">
+                            <i class="fas fa-user-shield"></i>
+                            <span data-translate="create_teacher_access">Create Teacher Access</span>
+                        </h3>
+                        <button onclick="closeCredentialModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                            <i class="fas fa-times"></i>
+                        </button>
                     </div>
-                    <div class="modal-body">
+                    
+                    <!-- Body -->
+                    <div style="padding: 2rem; overflow-y: auto; flex: 1;">
                         <form id="credentialForm" onsubmit="return saveTeacherCredentials(event);">
                             <input type="hidden" id="credential_teacher_id" name="teacher_id">
                             
-                            <div class="form-group">
-                                <label data-translate="modal_teacher_name">Teacher Name</label>
-                                <input type="text" id="credential_teacher_name" class="premium-select" readonly>
+                            <div style="margin-bottom: 1.5rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e293b;" data-translate="modal_teacher_name">Teacher Name</label>
+                                <input type="text" id="credential_teacher_name" readonly style="width: 100%; padding: 0.75rem; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 1rem; background: #f8fafc; color: #64748b;">
                             </div>
                             
-                            <div class="form-group">
-                                <label data-translate="modal_login_username">Login Email/Username *</label>
-                                <input type="text" id="credential_username" name="username" class="premium-select" 
-                                       data-translate-placeholder="modal_username_placeholder" placeholder="teacher.email@school.edu" required>
-                                <small style="color: #64748b; font-size: 0.85rem;" data-translate="modal_username_hint">This will be used for login</small>
+                            <div style="margin-bottom: 1.5rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e293b;"><span data-translate="modal_login_username">Login Email/Username</span> <span style="color: #ef4444;">*</span></label>
+                                <input type="text" id="credential_username" name="username" required
+                                       data-translate-placeholder="modal_username_placeholder" placeholder="teacher.email@school.edu"
+                                       style="width: 100%; padding: 0.75rem; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 1rem; transition: border-color 0.2s;" 
+                                       onfocus="this.style.borderColor='#1e40af'" 
+                                       onblur="this.style.borderColor='#e2e8f0'">
+                                <small style="display: block; margin-top: 0.5rem; color: #64748b; font-size: 0.875rem;" data-translate="modal_username_hint">This will be used for login</small>
                             </div>
                             
-                            <div class="form-group">
-                                <label><span data-translate="modal_password">Password</span> <span id="passwordNote" style="color: #64748b; font-size: 0.85rem;"></span></label>
-                                <input type="text" id="credential_password" name="password" class="premium-select" 
-                                       data-translate-placeholder="modal_password_placeholder" placeholder="Enter new password">
-                                <small style="color: #64748b; font-size: 0.85rem;" data-translate="modal_password_hint">Minimum 6 characters. Leave blank to keep current password.</small>
+                            <div style="margin-bottom: 1.5rem;">
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e293b;">
+                                    <span data-translate="modal_password">Password</span> 
+                                    <span id="passwordNote" style="font-weight: 400; font-size: 0.875rem;"></span>
+                                </label>
+                                <input type="text" id="credential_password" name="password"
+                                       data-translate-placeholder="modal_password_placeholder" placeholder="Enter new password"
+                                       style="width: 100%; padding: 0.75rem; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 1rem; transition: border-color 0.2s;" 
+                                       onfocus="this.style.borderColor='#1e40af'" 
+                                       onblur="this.style.borderColor='#e2e8f0'">
+                                <small style="display: block; margin-top: 0.5rem; color: #64748b; font-size: 0.875rem;" data-translate="modal_password_hint">Minimum 6 characters. Leave blank to keep current password.</small>
                             </div>
                             
-                            <div class="form-actions" style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
-                                <button type="button" class="action-btn delete" onclick="closeCredentialModal()" data-translate="modal_cancel">Cancel</button>
-                                <button type="submit" class="action-btn edit" data-translate="modal_save">Save Credentials</button>
+                            <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 2rem; padding-top: 1.5rem; border-top: 2px solid #e5e7eb;">
+                                <button type="button" onclick="closeCredentialModal()" 
+                                        style="padding: 0.75rem 1.5rem; border: 2px solid #e5e7eb; background: white; color: #64748b; border-radius: 8px; cursor: pointer; font-weight: 600; transition: all 0.2s;"
+                                        onmouseover="this.style.background='#f8fafc'; this.style.borderColor='#cbd5e1'" 
+                                        onmouseout="this.style.background='white'; this.style.borderColor='#e5e7eb'">
+                                    <span data-translate="modal_cancel">Cancel</span>
+                                </button>
+                                <button type="submit" 
+                                        style="padding: 0.75rem 2rem; border: none; background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%); color: white; border-radius: 8px; cursor: pointer; font-weight: 600; transition: transform 0.2s, box-shadow 0.2s; box-shadow: 0 4px 12px rgba(30, 64, 175, 0.3);"
+                                        onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 20px rgba(30, 64, 175, 0.4)'" 
+                                        onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 12px rgba(30, 64, 175, 0.3)'">
+                                    <i class="fas fa-save" style="margin-right: 0.5rem;"></i>
+                                    <span data-translate="modal_save">Save Credentials</span>
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -9071,7 +9666,7 @@ if ($page == 'reports') {
                 'Basics of Principle Statistics': 'subject-math',
                 'Computer Essentials': 'subject-computer',
                 'English': 'subject-english',
-                'Music': 'subject-history',
+                'MIS': 'subject-history',
                 'Advanced C++': 'subject-computer',
                 'Database': 'subject-computer',
                 'Web Development': 'subject-computer',
@@ -9258,10 +9853,10 @@ if ($page == 'reports') {
                         form.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
                     }
                     
-                    // Reload page for updates to show
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 500);
+                    // Instead of reload, fetch and update the specific section
+                    if (page) {
+                        fetchAndUpdateSection(page);
+                    }
                 } else if (error) {
                     // Extract error message if possible
                     const errorMatch = data.match(/Error: ([^<]+)/);
@@ -9289,6 +9884,64 @@ if ($page == 'reports') {
             });
             
             return false;
+        }
+
+        // Fetch and update section without full page refresh
+        function fetchAndUpdateSection(page = null) {
+            const currentPage = page || new URLSearchParams(window.location.search).get('page') || 'reports';
+            
+            showLoading('Updating Data', 'Please wait...');
+            
+            fetch(`?page=${currentPage}`)
+                .then(response => response.text())
+                .then(html => {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+                    
+                    // Update table based on page
+                    let tableId = '';
+                    if (currentPage === 'marks') tableId = 'marksTable';
+                    else if (currentPage === 'students') tableId = 'studentsTable';
+                    else if (currentPage === 'subjects') tableId = 'subjectsTable';
+                    else if (currentPage === 'teachers') tableId = 'teachersTable';
+                    else if (currentPage === 'graduated') tableId = 'graduatedTable';
+                    
+                    if (tableId) {
+                        const newTable = doc.getElementById(tableId);
+                        const oldTable = document.getElementById(tableId);
+                        
+                        if (newTable && oldTable) {
+                            // Only update tbody to preserve table structure
+                            const newTbody = newTable.querySelector('tbody');
+                            const oldTbody = oldTable.querySelector('tbody');
+                            
+                            if (newTbody && oldTbody) {
+                                oldTbody.innerHTML = newTbody.innerHTML;
+                            }
+                        }
+                    }
+                    
+                    // Update KPI cards on reports page
+                    if (currentPage === 'reports') {
+                        const kpiCards = doc.querySelectorAll('.kpi-card');
+                        kpiCards.forEach((newCard, index) => {
+                            const oldCard = document.querySelectorAll('.kpi-card')[index];
+                            if (oldCard) {
+                                const newValue = newCard.querySelector('.kpi-value');
+                                const oldValue = oldCard.querySelector('.kpi-value');
+                                if (newValue && oldValue) {
+                                    oldValue.textContent = newValue.textContent;
+                                }
+                            }
+                        });
+                    }
+                    
+                    hideLoading();
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Update error:', error);
+                });
         }
 
         // Reload table data without full page refresh
@@ -9788,9 +10441,7 @@ if ($page == 'reports') {
                 const gender = cells[3]?.textContent.trim() || '';
                 const classLevel = cells[4]?.textContent.trim().replace('Class ', '') || '';
                 const year = cells[5]?.textContent.trim().replace('Year ', '') || '';
-                const status = cells[6]?.textContent.trim() || '';
-                const email = cells[7]?.textContent.trim() || 'N/A';
-                const phone = cells[8]?.textContent.trim() || 'N/A';
+                const phone = cells[6]?.textContent.trim() || 'N/A';
                 
                 tableRows += `
                     <tr>
@@ -9799,8 +10450,6 @@ if ($page == 'reports') {
                         <td>${gender}</td>
                         <td>${classLevel}</td>
                         <td>Year ${year}</td>
-                        <td>${status}</td>
-                        <td>${email}</td>
                         <td>${phone}</td>
                     </tr>
                 `;
@@ -9822,8 +10471,6 @@ if ($page == 'reports') {
                             <th>Gender</th>
                             <th>Class</th>
                             <th>Year</th>
-                            <th>Status</th>
-                            <th>Email</th>
                             <th>Phone</th>
                         </tr>
                     </thead>
@@ -10610,8 +11257,13 @@ if ($page == 'reports') {
         }
 
         function promoteStudent(studentId) {
-            if (confirm('Are you sure you want to promote this student from Year 1 to Year 2?')) {
-                showLoading('Checking Eligibility', 'Validating student records...');
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            const confirmMsg = getTranslation('confirm_promote_student');
+            const loadingTitle = getTranslation('checking_eligibility');
+            const loadingMsg = getTranslation('validating_records');
+            
+            if (confirm(confirmMsg)) {
+                showLoading(loadingTitle, loadingMsg);
                 
                 const formData = new FormData();
                 formData.append('action', 'promote_student');
@@ -10626,7 +11278,7 @@ if ($page == 'reports') {
                     hideLoading();
                     
                     if (data.success) {
-                        showNotification('Student promoted to Year 2!', 'success');
+                        showNotification(getTranslation('student_promoted_success'), 'success');
                         setTimeout(() => {
                             reloadTableData('students');
                         }, 500);
@@ -10638,14 +11290,19 @@ if ($page == 'reports') {
                 .catch(error => {
                     hideLoading();
                     console.error('Error:', error);
-                    showNotification('Network error. Please try again.', 'error');
+                    showNotification(getTranslation('network_error'), 'error');
                 });
             }
         }
 
         function graduateStudent(studentId) {
-            if (confirm('Are you sure you want to graduate this student? This will move them to the graduated students list.')) {
-                showLoading('Checking Eligibility', 'Validating student records...');
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            const confirmMsg = getTranslation('confirm_graduate_student');
+            const loadingTitle = getTranslation('checking_eligibility');
+            const loadingMsg = getTranslation('validating_records');
+            
+            if (confirm(confirmMsg)) {
+                showLoading(loadingTitle, loadingMsg);
                 
                 const formData = new FormData();
                 formData.append('action', 'graduate_student');
@@ -10660,7 +11317,7 @@ if ($page == 'reports') {
                     hideLoading();
                     
                     if (data.success) {
-                        showNotification('Student graduated successfully!', 'success');
+                        showNotification(getTranslation('student_graduated_success'), 'success');
                         setTimeout(() => {
                             reloadTableData('students');
                         }, 500);
@@ -10672,7 +11329,7 @@ if ($page == 'reports') {
                 .catch(error => {
                     hideLoading();
                     console.error('Error:', error);
-                    showNotification('Network error. Please try again.', 'error');
+                    showNotification(getTranslation('network_error'), 'error');
                 });
             }
         }
@@ -10685,62 +11342,95 @@ if ($page == 'reports') {
             let failedSubjectsHTML = '';
             if (failedSubjects.length > 0) {
                 failedSubjectsHTML = `
-                    <div style="margin-top: 1rem; padding: 1rem; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px;">
-                        <div style="font-weight: 600; color: #991b1b; margin-bottom: 0.5rem;"><i class="fas fa-times-circle"></i> Failed Subjects (Mark < 50):</div>
-                        <ul style="list-style: none; padding: 0; margin: 0;">
+                    <div style="margin-top: 1rem; background: #fef2f2; border-left: 4px solid #dc2626; border-radius: 6px; overflow: hidden;">
+                        <div style="padding: 0.75rem 1rem; background: #fee2e2; font-weight: 600; color: #991b1b; border-bottom: 1px solid #fca5a5;">
+                            <i class="fas fa-times-circle" style="margin-right: 0.5rem;"></i>
+                            <span data-translate="failed_subjects_label">Failed Subjects (Mark < 50)</span>
+                        </div>
+                        <div style="padding: 0.5rem; max-height: 200px; overflow-y: auto;">
                             ${failedSubjects.map(s => `
-                                <li style="padding: 0.5rem 0; border-bottom: 1px solid #fca5a5;">
-                                    <div style="display: flex; justify-content: space-between;">
-                                        <span style="font-weight: 500;">${s.subject}</span>
-                                        <span style="color: #dc2626; font-weight: 600;">${s.mark}/100</span>
-                                    </div>
-                                </li>
+                                <div style="padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #fecaca;">
+                                    <span style="font-weight: 500; color: #7f1d1d;">${s.subject}</span>
+                                    <span style="color: #dc2626; font-weight: 700; font-size: 1rem;">${s.mark}/100</span>
+                                </div>
                             `).join('')}
-                        </ul>
+                        </div>
                     </div>
                 `;
             }
             
             let requirementsHTML = '';
             if (details.reasons && details.reasons.length > 0) {
+                const reasonsList = details.reasons.map(r => {
+                    if (r.type === 'total_grade') {
+                        return `<li style="margin: 0.4rem 0;">${getTranslation('total_final_grade')}: ${r.grade}/${r.max} (${getTranslation('required')}: ≥${r.required})</li>`;
+                    } else if (r.type === 'failed_subjects') {
+                        return `<li style="margin: 0.4rem 0;">${getTranslation('failed_subjects')}: ${r.count}</li>`;
+                    }
+                    return '';
+                }).join('');
+                
                 requirementsHTML = `
-                    <div style="margin-top: 1rem; padding: 1rem; background: #fffbeb; border: 1px solid #fcd34d; border-radius: 6px;">
-                        <div style="font-weight: 600; color: #92400e; margin-bottom: 0.5rem;"><i class="fas fa-list-check"></i> Requirements:</div>
-                        <ul style="margin: 0; padding-left: 1.5rem;">
-                            ${details.reasons.map(r => `<li style="color: #78350f; margin: 0.3rem 0;">${r}</li>`).join('')}
+                    <div style="margin-top: 1rem; background: #fffbeb; border-left: 4px solid #f59e0b; border-radius: 6px; padding: 1rem;">
+                        <div style="font-weight: 600; color: #92400e; margin-bottom: 0.75rem;">
+                            <i class="fas fa-clipboard-list" style="margin-right: 0.5rem;"></i>
+                            <span data-translate="requirements">Requirements</span>:
+                        </div>
+                        <ul style="margin: 0; padding-left: 1.25rem; color: #78350f;">
+                            ${reasonsList}
                         </ul>
                     </div>
                 `;
             }
             
             const modalHTML = `
-                <div id="eligibilityErrorModal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 100000; display: flex; align-items: center; justify-content: center; animation: fadeIn 0.2s ease;">
-                    <div style="background: white; padding: 2rem; border-radius: 16px; width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3); animation: slideUp 0.3s ease;">
-                        <div style="text-align: center; margin-bottom: 1.5rem;">
-                            <div style="font-size: 4rem; margin-bottom: 0.5rem;"><i class="fas fa-exclamation-triangle" style="color: #F59E0B;"></i></div>
-                            <h3 style="margin: 0; color: #dc2626; font-size: 1.5rem; font-weight: 700;">Cannot ${actionType === 'Promotion' ? 'Promote' : 'Graduate'} Student</h3>
+                <div id="eligibilityErrorModal" onclick="if(event.target.id === 'eligibilityErrorModal') closeEligibilityErrorModal()" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 100000; display: flex; align-items: center; justify-content: center; padding: 1rem; animation: fadeIn 0.2s ease;">
+                    <div onclick="event.stopPropagation()" style="background: white; border-radius: 12px; width: 100%; max-width: 550px; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3); animation: slideUp 0.3s ease;">
+                        
+                        <!-- Header -->
+                        <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.25rem 1.5rem; border-radius: 12px 12px 0 0; display: flex; align-items: center; justify-content: space-between;">
+                            <h3 style="margin: 0; color: white; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem;">
+                                <i class="fas fa-exclamation-triangle"></i>
+                                <span data-translate="${actionType === 'Promotion' ? 'cannot_promote_student' : 'cannot_graduate_student'}">
+                                    Cannot ${actionType === 'Promotion' ? 'Promote' : 'Graduate'} Student
+                                </span>
+                            </h3>
+                            <button onclick="closeEligibilityErrorModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
                         
-                        <div style="background: #fee2e2; padding: 1rem; border-radius: 8px; border-left: 4px solid #dc2626; margin-bottom: 1rem;">
-                            <p style="margin: 0; color: #7f1d1d; font-weight: 500;">${data.message}</p>
+                        <!-- Content -->
+                        <div style="padding: 1.5rem; overflow-y: auto; flex: 1;">
+                            <div style="background: #fee2e2; padding: 1rem; border-radius: 8px; border-left: 4px solid #dc2626; margin-bottom: 1rem;">
+                                <p style="margin: 0; color: #7f1d1d; font-weight: 600; font-size: 0.95rem;" data-translate="student_not_meet_requirements">
+                                    Student does not meet ${actionType.toLowerCase()} requirements
+                                </p>
+                            </div>
+                            
+                            ${requirementsHTML}
+                            ${failedSubjectsHTML}
+                            
+                            <div style="margin-top: 1rem; background: #dbeafe; border-left: 4px solid #1e40af; border-radius: 8px; padding: 1rem;">
+                                <div style="font-weight: 600; color: #1e40af; margin-bottom: 0.75rem;">
+                                    <i class="fas fa-lightbulb" style="margin-right: 0.5rem;"></i>
+                                    <span data-translate="action_required">Action Required</span>:
+                                </div>
+                                <ul style="margin: 0; padding-left: 1.25rem; color: #1e3a8a;">
+                                    ${failedSubjects.length > 0 ? '<li><span data-translate="update_failed_subjects">Update failed subjects to have marks ≥ 50</span></li>' : ''}
+                                    ${details.total_final_grade < details.required_grade ? '<li><span data-translate="increase_marks">Increase marks to reach minimum final grade of 25</span></li>' : ''}
+                                    <li><span data-translate="review_marks">Review all subject marks before trying again</span></li>
+                                </ul>
+                            </div>
                         </div>
                         
-                        ${requirementsHTML}
-                        ${failedSubjectsHTML}
-                        
-                        <div style="margin-top: 1.5rem; padding: 1rem; background: #dbeafe; border-radius: 8px;">
-                            <div style="font-weight: 600; color: #1e40af; margin-bottom: 0.5rem;">💡 What to do:</div>
-                            <ul style="margin: 0; padding-left: 1.5rem; color: #1e3a8a;">
-                                ${failedSubjects.length > 0 ? '<li>Update failed subjects to have marks ≥ 50</li>' : ''}
-                                ${details.total_final_grade < details.required_grade ? '<li>Increase marks to reach minimum final grade of 25</li>' : ''}
-                                <li>Review all subject marks before trying again</li>
-                            </ul>
-                        </div>
-                        
-                        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+                        <!-- Footer -->
+                        <div style="padding: 1rem 1.5rem; border-top: 2px solid #e5e7eb; background: #f9fafb; border-radius: 0 0 12px 12px; display: flex; justify-content: flex-end;">
                             <button onclick="closeEligibilityErrorModal()" 
-                                    style="padding: 0.75rem 2rem; border: none; background: #3b82f6; color: white; border-radius: 8px; cursor: pointer; font-size: 1rem; font-weight: 600;">
-                                OK, I Understand
+                                    style="padding: 0.75rem 1.75rem; border: none; background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); color: white; border-radius: 8px; cursor: pointer; font-size: 0.95rem; font-weight: 600; transition: transform 0.2s, box-shadow 0.2s;" 
+                                    onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(30, 58, 138, 0.4)'" 
+                                    onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none'">
+                                <span data-translate="ok_understand">OK, I Understand</span>
                             </button>
                         </div>
                     </div>
@@ -10749,25 +11439,18 @@ if ($page == 'reports') {
             
             document.body.insertAdjacentHTML('beforeend', modalHTML);
             
-            // Add click outside to close
-            const modal = document.getElementById('eligibilityErrorModal');
-            modal.addEventListener('click', function(e) {
-                if (e.target === modal) {
-                    closeEligibilityErrorModal();
-                }
-            });
+            // Apply current language
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            applyTranslations(currentLang);
             
-            // Add ESC and Enter key to close
+            // Add ESC key to close
             const keyHandler = function(e) {
-                if (e.key === 'Escape' || e.key === 'Enter') {
+                if (e.key === 'Escape') {
                     closeEligibilityErrorModal();
                     document.removeEventListener('keydown', keyHandler);
                 }
             };
             document.addEventListener('keydown', keyHandler);
-            
-            // Store key handler reference for cleanup
-            modal.dataset.keyHandler = 'attached';
         }
         
         function closeEligibilityErrorModal() {
@@ -10775,6 +11458,169 @@ if ($page == 'reports') {
             if (modal) {
                 modal.style.animation = 'fadeOut 0.2s ease';
                 setTimeout(() => modal.remove(), 200);
+            }
+        }
+
+        // Show bulk action modal
+        function showBulkActionModal() {
+            // Count eligible students for each year
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            const loadingTitle = translations[currentLang]?.checking_eligibility || 'Checking Eligibility';
+            const loadingMessage = translations[currentLang]?.counting_eligible_students || 'Counting eligible students...';
+            showLoading(loadingTitle, loadingMessage);
+            
+            Promise.all([
+                fetch('?action=count_eligible_students&year=1').then(r => r.json()),
+                fetch('?action=count_eligible_students&year=2').then(r => r.json())
+            ]).then(([year1Data, year2Data]) => {
+                hideLoading();
+                
+                const year1Eligible = year1Data.eligible || 0;
+                const year1Total = year1Data.total || 0;
+                const year2Eligible = year2Data.eligible || 0;
+                const year2Total = year2Data.total || 0;
+                
+                const modalHTML = `
+                    <div id="bulkActionModal" onclick="if(event.target.id === 'bulkActionModal') closeBulkActionModal()" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 100000; display: flex; align-items: center; justify-content: center; padding: 1rem; animation: fadeIn 0.2s ease;">
+                        <div onclick="event.stopPropagation()" style="background: white; border-radius: 12px; width: 100%; max-width: 550px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); animation: slideUp 0.3s ease;">
+                            
+                            <!-- Header -->
+                            <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.25rem 1.5rem; border-radius: 12px 12px 0 0; display: flex; align-items: center; justify-content: space-between;">
+                                <h3 style="margin: 0; color: white; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem;">
+                                    <i class="fas fa-users-cog"></i>
+                                    <span data-translate="bulk_action">Bulk Promote/Graduate</span>
+                                </h3>
+                                <button onclick="closeBulkActionModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                    <i class="fas fa-times"></i>
+                                </button>
+                            </div>
+                            
+                            <!-- Content -->
+                            <div style="padding: 1.5rem;">
+                                <p style="margin: 0 0 1.5rem 0; color: #64748b; font-size: 0.95rem;">
+                                    <span data-translate="bulk_action_desc">Select which year students you want to promote or graduate. Only eligible students will be processed.</span>
+                                </p>
+                                
+                                <div style="display: flex; flex-direction: column; gap: 1rem;">
+                                    <button onclick="executeBulkAction(1)" class="apply-filters-btn" ${year1Eligible === 0 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : 'style="cursor: pointer;"'}>
+                                        <div style="width: 100%; padding: 1rem; background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%); display: flex; align-items: center; justify-content: space-between; border-radius: 8px;">
+                                            <div style="display: flex; align-items: center; gap: 0.75rem; flex: 1;">
+                                                <i class="fas fa-arrow-up" style="font-size: 1.25rem;"></i>
+                                                <div style="text-align: left; flex: 1;">
+                                                    <div style="font-weight: 700; margin-bottom: 0.25rem;"><span data-translate="promote_year_1">Promote Year 1 Students</span></div>
+                                                    <div style="font-size: 0.85rem; opacity: 0.9;"><span data-translate="year_1_to_year_2">Move eligible Year 1 students to Year 2</span></div>
+                                                    <div style="margin-top: 0.5rem; padding: 0.4rem 0.75rem; background: rgba(255,255,255,0.2); border-radius: 4px; display: inline-block;">
+                                                        <span data-translate="eligible">Eligible</span>: <strong>${year1Eligible}</strong> / ${year1Total}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <i class="fas fa-chevron-right" style="margin-left: 0.5rem;"></i>
+                                        </div>
+                                    </button>
+                                    
+                                    <button onclick="executeBulkAction(2)" class="apply-filters-btn" ${year2Eligible === 0 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : 'style="cursor: pointer;"'}>
+                                        <div style="width: 100%; padding: 1rem; background: linear-gradient(135deg, #d97706 0%, #b45309 100%); display: flex; align-items: center; justify-content: space-between; border-radius: 8px;">
+                                            <div style="display: flex; align-items: center; gap: 0.75rem; flex: 1;">
+                                                <i class="fas fa-graduation-cap" style="font-size: 1.25rem;"></i>
+                                                <div style="text-align: left; flex: 1;">
+                                                    <div style="font-weight: 700; margin-bottom: 0.25rem;"><span data-translate="graduate_year_2">Graduate Year 2 Students</span></div>
+                                                    <div style="font-size: 0.85rem; opacity: 0.9;"><span data-translate="year_2_to_graduated">Move eligible Year 2 students to graduated</span></div>
+                                                    <div style="margin-top: 0.5rem; padding: 0.4rem 0.75rem; background: rgba(255,255,255,0.2); border-radius: 4px; display: inline-block;">
+                                                        <span data-translate="eligible">Eligible</span>: <strong>${year2Eligible}</strong> / ${year2Total}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <i class="fas fa-chevron-right" style="margin-left: 0.5rem;"></i>
+                                        </div>
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <!-- Footer -->
+                            <div style="padding: 1rem 1.5rem; border-top: 2px solid #e5e7eb; background: #f9fafb; border-radius: 0 0 12px 12px; display: flex; justify-content: flex-end;">
+                                <button onclick="closeBulkActionModal()" class="clear-filters-btn" style="padding: 0.65rem 1.5rem;">
+                                    <span data-translate="cancel">Cancel</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                document.body.insertAdjacentHTML('beforeend', modalHTML);
+                
+                // Apply translations after DOM is fully rendered
+                setTimeout(() => {
+                    const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+                    
+                    // Manually translate all elements in the modal
+                    const modal = document.getElementById('bulkActionModal');
+                    if (modal && translations[currentLang]) {
+                        modal.querySelectorAll('[data-translate]').forEach(element => {
+                            const key = element.getAttribute('data-translate');
+                            if (translations[currentLang][key]) {
+                                element.textContent = translations[currentLang][key];
+                            }
+                        });
+                    }
+                }, 50);
+                
+                const keyHandler = function(e) {
+                    if (e.key === 'Escape') {
+                        closeBulkActionModal();
+                        document.removeEventListener('keydown', keyHandler);
+                    }
+                };
+                document.addEventListener('keydown', keyHandler);
+            }).catch(error => {
+                hideLoading();
+                console.error('Error:', error);
+                showNotification('Failed to load eligibility data', 'error');
+            });
+        }
+        
+        function closeBulkActionModal() {
+            const modal = document.getElementById('bulkActionModal');
+            if (modal) {
+                modal.style.animation = 'fadeOut 0.2s ease';
+                setTimeout(() => modal.remove(), 200);
+            }
+        }
+        
+        function executeBulkAction(year) {
+            const action = year === 1 ? 'promotion' : 'graduation';
+            const actionText = year === 1 ? 'promote' : 'graduate';
+            
+            if (confirm(`Are you sure you want to ${actionText} all eligible Year ${year} students? This action cannot be undone.`)) {
+                showLoading('Processing', `Checking and ${actionText}ing eligible students...`);
+                closeBulkActionModal();
+                
+                const formData = new FormData();
+                formData.append('action', 'bulk_' + action);
+                formData.append('year', year);
+                
+                fetch('', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    hideLoading();
+                    
+                    if (data.success) {
+                        const msg = `Successfully processed ${data.processed} student(s). ${data.promoted || data.graduated || 0} ${actionText}d, ${data.skipped || 0} skipped (not eligible).`;
+                        showNotification(msg, 'success');
+                        setTimeout(() => {
+                            reloadTableData('students');
+                        }, 1000);
+                    } else {
+                        showNotification(data.message || `Failed to ${actionText} students`, 'error');
+                    }
+                })
+                .catch(error => {
+                    hideLoading();
+                    console.error('Error:', error);
+                    showNotification('Network error. Please try again.', 'error');
+                });
             }
         }
 
@@ -10791,7 +11637,7 @@ if ($page == 'reports') {
                                 <span data-translate="edit_student">Edit Student</span>
                             </h3>
                             <button onclick="closeEditModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
-                                ×
+                                <i class="fas fa-times"></i>
                             </button>
                         </div>
                         
@@ -10985,10 +11831,10 @@ if ($page == 'reports') {
                         <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; border-radius: 12px 12px 0 0; display: flex; justify-content: space-between; align-items: center;">
                             <h3 style="margin: 0; color: white; font-size: 1.25rem; font-weight: 600;">
                                 <i class="fas fa-book" style="margin-right: 0.5rem;"></i>
-                                Edit Subject
+                                <span data-translate="edit_subject">Edit Subject</span>
                             </h3>
                             <button onclick="closeEditSubjectModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
-                                ×
+                                <i class="fas fa-times"></i>
                             </button>
                         </div>
                         
@@ -11000,26 +11846,26 @@ if ($page == 'reports') {
                                 
                                 <div style="display: flex; flex-direction: column; gap: 1.25rem;">
                                     <div>
-                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Subject Name *</label>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="subject_name">Subject Name *</label>
                                         <input type="text" name="subject_name" value="${subject.subject_name || ''}" required 
                                                style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
                                     </div>
                                     <div>
-                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Description</label>
+                                        <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="description">Description</label>
                                         <textarea name="description" rows="3" 
                                                   style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem; resize: vertical;">${subject.description || ''}</textarea>
                                     </div>
                                     <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem;">
                                         <div>
-                                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Academic Year *</label>
+                                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="academic_year">Academic Year *</label>
                                             <select name="year" required style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
-                                                <option value="">Select Year</option>
-                                                <option value="1" ${subject.year === '1' || subject.year === 1 ? 'selected' : ''}>Year 1</option>
-                                                <option value="2" ${subject.year === '2' || subject.year === 2 ? 'selected' : ''}>Year 2</option>
+                                                <option value="" data-translate="select_year">Select Year</option>
+                                                <option value="1" ${subject.year === '1' || subject.year === 1 ? 'selected' : ''} data-translate="year_1">Year 1</option>
+                                                <option value="2" ${subject.year === '2' || subject.year === 2 ? 'selected' : ''} data-translate="year_2">Year 2</option>
                                             </select>
                                         </div>
                                         <div>
-                                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;">Credits *</label>
+                                            <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="credits">Credits *</label>
                                             <input type="number" name="credits" value="${subject.credits || ''}" min="1" max="50" required 
                                                    style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
                                         </div>
@@ -11034,13 +11880,13 @@ if ($page == 'reports') {
                                     style="padding: 0.65rem 1.5rem; border: 1.5px solid #cbd5e1; background: white; color: #475569; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; font-size: 0.95rem;" 
                                     onmouseover="this.style.background='#f1f5f9'; this.style.borderColor='#94a3b8'" onmouseout="this.style.background='white'; this.style.borderColor='#cbd5e1'">
                                 <i class="fas fa-times" style="margin-right: 0.5rem;"></i>
-                                Cancel
+                                <span data-translate="cancel">Cancel</span>
                             </button>
                             <button type="submit" form="editSubjectForm" 
                                     style="padding: 0.65rem 1.5rem; border: none; background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); color: white; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s; font-size: 0.95rem; box-shadow: 0 2px 8px rgba(30,58,138,0.3);" 
                                     onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 4px 12px rgba(30,58,138,0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(30,58,138,0.3)'">
                                 <i class="fas fa-save" style="margin-right: 0.5rem;"></i>
-                                Update Subject
+                                <span data-translate="update_subject">Update Subject</span>
                             </button>
                         </div>
                         
@@ -11049,6 +11895,10 @@ if ($page == 'reports') {
             `;
             
             document.body.insertAdjacentHTML('beforeend', modalHTML);
+            
+            // Apply translations to the newly added modal
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            changeLanguage(currentLang);
         }
 
         function closeEditSubjectModal() {
@@ -11867,21 +12717,21 @@ if ($page == 'reports') {
                 const studentGender = cells[3].textContent.trim();
                 const studentClass = cells[4].textContent.trim();
                 const studentYear = cells[5].textContent.trim();
-                const studentEmail = cells[7].textContent.toLowerCase();
-                const studentPhone = cells[8].textContent.toLowerCase();
-                const studentSubjects = cells[9].textContent.trim();
+                const studentPhone = cells[6].textContent.toLowerCase();
+                const studentSubjects = cells[7].textContent.trim();
                 
                 // Check search criteria
                 const matchesSearch = searchValue === '' || 
                     studentName.includes(searchValue) || 
-                    studentEmail.includes(searchValue) ||
                     studentPhone.includes(searchValue);
                 
                 const matchesClass = classFilter === '' || studentClass === classFilter;
                 const matchesGender = genderFilter === '' || studentGender === genderFilter;
                 
-                // Year matching
-                const matchesYear = yearFilter === '' || studentYear.includes('Year ' + yearFilter);
+                // Year matching - extract numeric year from badge to work with all languages
+                const yearMatch = studentYear.match(/\d+/);
+                const studentYearNumber = yearMatch ? yearMatch[0] : '';
+                const matchesYear = yearFilter === '' || studentYearNumber === yearFilter;
                 
                 // Age range matching
                 let matchesAge = true;
@@ -12354,7 +13204,8 @@ if ($page == 'reports') {
             if (!classFilter) return;
             
             // Clear current options except the default
-            classFilter.innerHTML = '<option value="" data-translate="all_classes">All Classes</option>';
+            const allClassesText = getTranslation('all_classes');
+            classFilter.innerHTML = `<option value="">${allClassesText}</option>`;
             
             if (selectedYear === '') {
                 // If no year selected, show all classes
@@ -12377,7 +13228,9 @@ if ($page == 'reports') {
                         option.value = className;
                         const year = className.charAt(0);
                         const letter = className.charAt(1);
-                        option.textContent = `Year \${year} - Class \${letter}`;
+                        const yearText = getTranslation('year');
+                        const classText = getTranslation('class');
+                        option.textContent = `\${yearText} \${year} - \${classText} \${letter}`;
                         classFilter.appendChild(option);
                     });
                     ";
@@ -12386,11 +13239,13 @@ if ($page == 'reports') {
             } else {
                 // Show only classes for selected year
                 const classes = ['A', 'B', 'C'];
+                const yearText = getTranslation('year');
+                const classText = getTranslation('class');
                 classes.forEach(letter => {
                     const className = selectedYear + letter;
                     const option = document.createElement('option');
                     option.value = className;
-                    option.textContent = `Year ${selectedYear} - Class ${letter}`;
+                    option.textContent = `${yearText} ${selectedYear} - ${classText} ${letter}`;
                     classFilter.appendChild(option);
                 });
             }
@@ -12440,6 +13295,7 @@ if ($page == 'reports') {
                 nav_graduated: "Graduated",
                 nav_subjects: "Subjects",
                 nav_marks: "Marks",
+                logout: "Logout",
                 system_title: "Student Management",
                 system_subtitle: "Academic Portal",
                 weekly_schedule: "Weekly Schedule",
@@ -12523,6 +13379,7 @@ if ($page == 'reports') {
                 promote: "Promote",
                 graduate: "Graduate",
                 save: "Save",
+                update: "Update",
                 cancel: "Cancel",
                 grade_distribution: "Grade Distribution",
                 subject_performance: "Subject Performance", 
@@ -12530,7 +13387,7 @@ if ($page == 'reports') {
                 performance_trends: "Performance Trends",
                 detailed_reports: "Detailed Reports",
                 export_csv: "Export CSV",
-                print: "🖨️ Print",
+                print: "Print",
                 full_name: "Full Name",
                 name: "Name",
                 age: "Age",
@@ -12608,6 +13465,8 @@ if ($page == 'reports') {
                 select_subject_first: "Select subject first",
                 no_class_assignment: "No class assignment",
                 assigned_subjects: "Assigned Subjects",
+                no_subject_assignments: "No subject assignments yet",
+                assign_new_subject: "Assign New Subject",
                 join_date: "Join Date",
                 add_teacher: "Add Teacher",
                 edit_teacher: "Edit Teacher",
@@ -12615,6 +13474,8 @@ if ($page == 'reports') {
                 view_teacher: "View Teacher",
                 assign_subjects: "Assign Subjects",
                 remove_assignment: "Remove Assignment",
+                assigned: "Assigned",
+                remove: "Remove",
                 teacher_email: "teacher@school.edu",
                 filter_specialization: "Filter by Specialization",
                 filter_degree: "Filter by Degree",
@@ -12665,7 +13526,7 @@ if ($page == 'reports') {
                 no_teachers_found: "No teachers found",
                 create_teacher_access: "Create Teacher Access",
                 modal_teacher_name: "Teacher Name",
-                modal_login_username: "Login Email/Username *",
+                modal_login_username: "Login Email/Username",
                 modal_username_placeholder: "teacher.email@school.edu",
                 modal_username_hint: "This will be used for login",
                 modal_password: "Password",
@@ -12764,6 +13625,55 @@ if ($page == 'reports') {
                 mark_calculation: "Mark Calculation",
                 current_total: "Current Total",
                 update_mark: "Update Mark",
+                update_subject: "Update Subject",
+                edit_subject: "Edit Subject",
+                subject_name: "Subject Name",
+                cannot_promote_student: "Cannot Promote Student",
+                cannot_graduate_student: "Cannot Graduate Student",
+                student_not_meet_requirements: "Student does not meet requirements",
+                failed_subjects_label: "Failed Subjects (Mark < 50)",
+                requirements: "Requirements",
+                action_required: "Action Required",
+                update_failed_subjects: "Update failed subjects to have marks ≥ 50",
+                increase_marks: "Increase marks to reach minimum final grade of 25",
+                review_marks: "Review all subject marks before trying again",
+                ok_understand: "OK, I Understand",
+                bulk_promote_graduate: "Bulk Promote/Graduate",
+                bulk_action: "Bulk Promote/Graduate",
+                bulk_action_desc: "Select which year students you want to promote or graduate. Only eligible students will be processed.",
+                promote_year_1: "Promote Year 1 Students",
+                year_1_to_year_2: "Move eligible Year 1 students to Year 2",
+                graduate_year_2: "Graduate Year 2 Students",
+                year_2_to_graduated: "Move eligible Year 2 students to graduated",
+                eligible: "Eligible",
+                checking_eligibility: "Checking Eligibility",
+                counting_eligible_students: "Counting eligible students...",
+                validating_records: "Validating student records...",
+                confirm_promote_student: "Are you sure you want to promote this student from Year 1 to Year 2?",
+                confirm_graduate_student: "Are you sure you want to graduate this student? This will move them to the graduated students list.",
+                student_promoted_success: "Student promoted to Year 2!",
+                student_graduated_success: "Student graduated successfully!",
+                network_error: "Network error. Please try again.",
+                promote_to_year_2: "Promote to Year 2",
+                select_year_2_subjects: "Select Year 2 subjects for this student",
+                student_eligible_promotion: "Student Eligible for Promotion",
+                all_requirements_met: "All requirements met! Select Year 2 subjects to enroll.",
+                available_year_2_subjects: "Available Year 2 Subjects",
+                promote_student: "Promote Student",
+                error_loading_subjects: "Error loading subjects. Please try again.",
+                select_at_least_one_subject: "Please select at least one Year 2 subject.",
+                promoting_student: "Promoting Student",
+                moving_to_year_2: "Moving to Year 2...",
+                error_promoting_student: "Error promoting student",
+                loading: "Loading",
+                saving: "Saving",
+                switching_language: "Switching Language",
+                please_wait: "Please wait...",
+                total_final_grade: "Total Final Grade",
+                required: "Required",
+                failed_subjects: "Failed Subjects",
+                my_tasks_schedule: "My Tasks & Schedule",
+                no_tasks_yet: "No tasks yet. Create your first task above to get started.",
                 analytics_report: "Analytics Report",
                 generated_on: "Generated on",
                 no_data_to_print: "No data to print",
@@ -12818,6 +13728,7 @@ if ($page == 'reports') {
                 nav_graduated: "المتخرجون",
                 nav_subjects: "المواد", 
                 nav_marks: "الدرجات",
+                logout: "تسجيل الخروج",
                 system_title: "إدارة الطلاب",
                 system_subtitle: "البوابة الأكاديمية",
                 weekly_schedule: "الجدول الأسبوعي",
@@ -12897,6 +13808,7 @@ if ($page == 'reports') {
                 promote: "ترقية",
                 graduate: "تخرج",
                 save: "حفظ",
+                update: "تحديث",
                 cancel: "إلغاء",
                 grade_distribution: "توزيع الدرجات",
                 subject_performance: "أداء المواد",
@@ -12904,7 +13816,7 @@ if ($page == 'reports') {
                 performance_trends: "اتجاهات الأداء",
                 detailed_reports: "التقارير التفصيلية",
                 export_csv: "تصدير CSV",
-                print: "🖨️ طباعة",
+                print:  "طباعة",
                 full_name: "الاسم الكامل",
                 name: "الاسم",
                 age: "العمر",
@@ -12982,6 +13894,8 @@ if ($page == 'reports') {
                 select_subject_first: "اختر المادة أولاً",
                 no_class_assignment: "بدون تعيين صف",
                 assigned_subjects: "المواد المكلف بها",
+                no_subject_assignments: "لا توجد مواد مكلف بها بعد",
+                assign_new_subject: "تعيين مادة جديدة",
                 join_date: "تاريخ الانضمام",
                 add_teacher: "إضافة معلم",
                 edit_teacher: "تعديل المعلم",
@@ -12989,6 +13903,8 @@ if ($page == 'reports') {
                 view_teacher: "عرض المعلم",
                 assign_subjects: "تعيين المواد",
                 remove_assignment: "إزالة التكليف",
+                assigned: "مُكلَّف",
+                remove: "إزالة",
                 teacher_email: "teacher@school.edu",
                 filter_specialization: "تصفية حسب التخصص",
                 filter_degree: "تصفية حسب الدرجة",
@@ -13162,6 +14078,55 @@ if ($page == 'reports') {
                 mark_calculation: "حساب الدرجة",
                 current_total: "المجموع الحالي",
                 update_mark: "تحديث الدرجة",
+                update_subject: "تحديث المادة",
+                edit_subject: "تعديل المادة",
+                subject_name: "اسم المادة",
+                cannot_promote_student: "لا يمكن ترقية الطالب",
+                cannot_graduate_student: "لا يمكن تخريج الطالب",
+                student_not_meet_requirements: "الطالب لا يستوفي المتطلبات",
+                failed_subjects_label: "المواد الراسبة (الدرجة < 50)",
+                requirements: "المتطلبات",
+                action_required: "الإجراء المطلوب",
+                update_failed_subjects: "تحديث المواد الراسبة للحصول على درجات ≥ 50",
+                increase_marks: "زيادة الدرجات للوصول إلى الحد الأدنى من الدرجة النهائية 25",
+                review_marks: "راجع جميع درجات المواد قبل المحاولة مرة أخرى",
+                ok_understand: "حسناً، فهمت",
+                bulk_promote_graduate: "ترقية/تخريج جماعي",
+                bulk_action: "ترقية/تخريج جماعي",
+                bulk_action_desc: "اختر السنة التي تريد ترقية أو تخريج طلابها. سيتم معالجة الطلاب المؤهلين فقط.",
+                promote_year_1: "ترقية طلاب السنة الأولى",
+                year_1_to_year_2: "نقل طلاب السنة الأولى المؤهلين إلى السنة الثانية",
+                graduate_year_2: "تخريج طلاب السنة الثانية",
+                year_2_to_graduated: "نقل طلاب السنة الثانية المؤهلين إلى الخريجين",
+                eligible: "مؤهل",
+                checking_eligibility: "فحص الأهلية",
+                counting_eligible_students: "حساب الطلاب المؤهلين...",
+                validating_records: "التحقق من سجلات الطلاب...",
+                confirm_promote_student: "هل أنت متأكد من ترقية هذا الطالب من السنة الأولى إلى السنة الثانية؟",
+                confirm_graduate_student: "هل أنت متأكد من تخريج هذا الطالب؟ سيتم نقله إلى قائمة الخريجين.",
+                student_promoted_success: "تمت ترقية الطالب إلى السنة الثانية!",
+                student_graduated_success: "تم تخريج الطالب بنجاح!",
+                network_error: "خطأ في الشبكة. يرجى المحاولة مرة أخرى.",
+                promote_to_year_2: "الترقية إلى السنة الثانية",
+                select_year_2_subjects: "اختر مواد السنة الثانية لهذا الطالب",
+                student_eligible_promotion: "الطالب مؤهل للترقية",
+                all_requirements_met: "تم استيفاء جميع المتطلبات! اختر مواد السنة الثانية للتسجيل.",
+                available_year_2_subjects: "مواد السنة الثانية المتاحة",
+                promote_student: "ترقية الطالب",
+                error_loading_subjects: "خطأ في تحميل المواد. يرجى المحاولة مرة أخرى.",
+                select_at_least_one_subject: "يرجى اختيار مادة واحدة على الأقل من السنة الثانية.",
+                promoting_student: "ترقية الطالب",
+                moving_to_year_2: "الانتقال إلى السنة الثانية...",
+                error_promoting_student: "خطأ في ترقية الطالب",
+                loading: "جاري التحميل",
+                saving: "جاري الحفظ",
+                switching_language: "تغيير اللغة",
+                total_final_grade: "إجمالي الدرجة النهائية",
+                required: "المطلوب",
+                failed_subjects: "المواد الراسبة",
+                my_tasks_schedule: "مهامي وجدولي",
+                no_tasks_yet: "لا توجد مهام بعد. قم بإنشاء مهمتك الأولى أعلاه للبدء.",
+                please_wait: "يرجى الانتظار...",
                 analytics_report: "تقرير التحليلات",
                 generated_on: "تم الإنشاء في",
                 no_data_to_print: "لا توجد بيانات للطباعة",
@@ -13197,6 +14162,7 @@ if ($page == 'reports') {
                 nav_graduated: "دەرچووەکان",
                 nav_subjects: "وانەکان",
                 nav_marks: "نمرەکان",
+                logout: "دەرچوون",
                 system_title: "بەڕێوەبردنی قوتابییان",
                 system_subtitle: "دەرگای ئەکادیمی",
                 weekly_schedule: "خشتەی هەفتانە",
@@ -13276,6 +14242,7 @@ if ($page == 'reports') {
                 promote: "بەرزکردنەوە",
                 graduate: "دەرچوون",
                 save: "پاشەکەوت",
+                update: "نوێکردنەوە",
                 cancel: "هەڵوەشاندنەوە",
                 grade_distribution: "دابەشکردنی نمرەکان",
                 subject_performance: "کارایی وانەکان",
@@ -13283,7 +14250,7 @@ if ($page == 'reports') {
                 performance_trends: "ئاراستەی کارایی", 
                 detailed_reports: "ڕاپۆرتە ورددەکان",
                 export_csv: "هەناردنی CSV",
-                print: "🖨️ چاپکردن",
+                print:  "چاپکردن",
                 full_name: "ناوی تەواو",
                 name: "ناو",
                 age: "تەمەن",
@@ -13362,6 +14329,8 @@ if ($page == 'reports') {
                 select_subject_first: "یەکەم وانە هەڵبژێرە",
                 no_class_assignment: "دیاریکردنی پۆل نییە",
                 assigned_subjects: "وانە دیاریکراوەکان",
+                no_subject_assignments: "هێشتا هیچ وانەیەک دیاری نەکراوە",
+                assign_new_subject: "دیاریکردنی وانەی نوێ",
                 join_date: "بەرواری بەشداریکردن",
                 add_teacher: "مامۆستا زیادبکە",
                 edit_teacher: "دەستکاری مامۆستا",
@@ -13369,6 +14338,8 @@ if ($page == 'reports') {
                 view_teacher: "پیشاندانی مامۆستا",
                 assign_subjects: "دیاریکردنی وانەکان",
                 remove_assignment: "لابردنی دیاریکراو",
+                assigned: "دیاریکراو",
+                remove: "لابردن",
                 teacher_email: "ئیمەیڵی مامۆستا",
                 filter_specialization: "پاڵاوتن بە پسپۆڕی",
                 filter_degree: "پاڵاوتن بە بڕوانامە",
@@ -13539,6 +14510,55 @@ if ($page == 'reports') {
                 mark_calculation: "ژمێریاری نمرە",
                 current_total: "کۆی ئێستا",
                 update_mark: "نوێکردنەوەی نمرە",
+                update_subject: "وانە نوێبکەرەوە",
+                edit_subject: "دەستکاری وانە",
+                subject_name: "ناوی وانە",
+                cannot_promote_student: "ناتوانرێت قوتابی بەرزبکرێتەوە",
+                cannot_graduate_student: "ناتوانرێت قوتابی دەرچووبکرێت",
+                student_not_meet_requirements: "قوتابی پێداویستیەکان بەدی ناهێنێت",
+                failed_subjects_label: "وانە شکستخواردووەکان (نمرە < 50)",
+                requirements: "پێداویستیەکان",
+                action_required: "کردار پێویستە",
+                update_failed_subjects: "نوێکردنەوەی وانە شکستخواردووەکان بۆ وەرگرتنی نمرەی ≥ 50",
+                increase_marks: "زیادکردنی نمرەکان بۆ گەیشتن بە کەمترین نمرەی کۆتایی 25",
+                review_marks: "پێداچوونەوەی هەموو نمرەکانی وانەکان پێش هەوڵدانەوە",
+                ok_understand: "باشە، تێگەیشتم",
+                bulk_promote_graduate: "بەرزکردنەوە/دەرچوون بە کۆمەڵ",
+                bulk_action: "بەرزکردنەوە/دەرچوون بە کۆمەڵ",
+                bulk_action_desc: "ساڵی قوتابیانی دیاریبکە کە دەتەوێت بەرز یان دەرچووبکەیتەوە. تەنها قوتابیە شایستەکان پرۆسێس دەکرێن.",
+                promote_year_1: "بەرزکردنەوەی قوتابیانی ساڵی یەکەم",
+                year_1_to_year_2: "گواستنەوەی قوتابیە شایستەکانی ساڵی یەکەم بۆ ساڵی دووەم",
+                graduate_year_2: "دەرچوونی قوتابیانی ساڵی دووەم",
+                year_2_to_graduated: "گواستنەوەی قوتابیە شایستەکانی ساڵی دووەم بۆ دەرچووان",
+                eligible: "شایستە",
+                checking_eligibility: "پشکنینی شایستەیی",
+                counting_eligible_students: "ژمێرینی قوتابیە شایستەکان...",
+                validating_records: "دڵنیابوون لە تۆمارەکانی قوتابیان...",
+                confirm_promote_student: "دڵنیایت لە بەرزکردنەوەی ئەم قوتابیە لە ساڵی یەکەم بۆ ساڵی دووەم؟",
+                confirm_graduate_student: "دڵنیایت لە دەرچوونی ئەم قوتابیە؟ ئەمە دەیگوێزێتەوە بۆ لیستی دەرچووان.",
+                student_promoted_success: "قوتابی بەرزکرایەوە بۆ ساڵی دووەم!",
+                student_graduated_success: "قوتابی بە سەرکەوتوویی دەرچوو!",
+                network_error: "هەڵەی تۆڕ. تکایە دووبارە هەوڵ بدەوە.",
+                promote_to_year_2: "بەرزکردنەوە بۆ ساڵی دووەم",
+                select_year_2_subjects: "بابەتەکانی ساڵی دووەم هەڵبژێرە بۆ ئەم قوتابیە",
+                student_eligible_promotion: "قوتابی شایستەی بەرزکردنەوەیە",
+                all_requirements_met: "هەموو پێداویستیەکان تەواو بوون! بابەتەکانی ساڵی دووەم هەڵبژێرە بۆ تۆمارکردن.",
+                available_year_2_subjects: "بابەتە بەردەستەکانی ساڵی دووەم",
+                promote_student: "بەرزکردنەوەی قوتابی",
+                error_loading_subjects: "هەڵە لە بارکردنی بابەتەکان. تکایە دووبارە هەوڵ بدەوە.",
+                select_at_least_one_subject: "تکایە لانیکەم یەک بابەتی ساڵی دووەم هەڵبژێرە.",
+                promoting_student: "بەرزکردنەوەی قوتابی",
+                moving_to_year_2: "گواستنەوە بۆ ساڵی دووەم...",
+                error_promoting_student: "هەڵە لە بەرزکردنەوەی قوتابی",
+                loading: "بارکردن",
+                saving: "پاشەکەوتکردن",
+                switching_language: "گۆڕینی زمان",
+                total_final_grade: "کۆی نمرەی کۆتایی",
+                required: "پێویست",
+                failed_subjects: "بابەتە شکستخواردووەکان",
+                my_tasks_schedule: "ئەرکەکانم و خشتەکەم",
+                no_tasks_yet: "هێشتا هیچ ئەرکێک نییە. یەکەمین ئەرکەکەت لە سەرەوە دروست بکە بۆ دەستپێکردن.",
+                please_wait: "تکایە چاوەڕێ بکە...",
                 analytics_report: "ڕاپۆرتی شیکاری",
                 generated_on: "دروستکراوە لە",
                 no_data_to_print: "هیچ زانیاریەک نییە بۆ چاپکردن",
@@ -13555,25 +14575,19 @@ if ($page == 'reports') {
 
         // Initialize language on page load
         document.addEventListener('DOMContentLoaded', function() {
-            try {
-                // Check if translations object is properly loaded
-                if (typeof translations === 'undefined' || !translations) {
-                    console.error('Translations object not loaded properly');
-                    return;
-                }
-                
-                const savedLang = localStorage.getItem('selectedLanguage') || 'en';
-                changeLanguage(savedLang);
-                
-                // Update language selector
-                const langSelector = document.getElementById('languageSelector');
-                if (langSelector) {
-                    langSelector.value = savedLang;
-                }
-            } catch (error) {
-                console.error('Language initialization error:', error);
-                // Force English as fallback
-                localStorage.setItem('selectedLanguage', 'en');
+            // Check if translations object is properly loaded
+            if (typeof translations === 'undefined' || !translations) {
+                console.error('Translations object not loaded properly');
+                return;
+            }
+            
+            const savedLang = localStorage.getItem('selectedLanguage') || 'en';
+            changeLanguage(savedLang);
+            
+            // Update language selector
+            const langSelector = document.getElementById('languageSelector');
+            if (langSelector) {
+                langSelector.value = savedLang;
             }
             
             // Initialize subject filtering in add student form
@@ -13586,16 +14600,55 @@ if ($page == 'reports') {
 
         // Get translation for current language
         function getTranslation(key) {
-            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
-            if (translations[currentLang] && translations[currentLang][key]) {
-                return translations[currentLang][key];
+            try {
+                const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+                if (typeof translations !== 'undefined' && translations[currentLang] && translations[currentLang][key]) {
+                    return translations[currentLang][key];
+                }
+                // Fallback to English if translation not found
+                if (typeof translations !== 'undefined' && translations.en && translations.en[key]) {
+                    return translations.en[key];
+                }
+                return key;
+            } catch (error) {
+                console.error('Translation error for key:', key, error);
+                return key;
             }
-            // Fallback to English if translation not found
-            return translations.en[key] || key;
         }
 
         // Language switching function
-        function changeLanguage(lang) {
+        function changeLanguage(lang, skipReload = false) {
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            
+            // If language hasn't changed and we're not forcing, just update elements
+            if (lang === currentLang && !skipReload) {
+                applyTranslations(lang);
+                return;
+            }
+            
+            // Only show loader and reload if language actually changed
+            if (lang !== currentLang) {
+                // Show loader while switching language
+                showLoading(
+                    translations[lang]?.switching_language || 'Switching Language',
+                    translations[lang]?.please_wait || 'Please wait...'
+                );
+                
+                // Save new language and reload
+                localStorage.setItem('selectedLanguage', lang);
+                
+                setTimeout(() => {
+                    window.location.reload();
+                }, 250);
+                return;
+            }
+            
+            // Apply translations without reload
+            applyTranslations(lang);
+        }
+        
+        // Apply translations to all elements
+        function applyTranslations(lang) {
             localStorage.setItem('selectedLanguage', lang);
             
             // Keep all languages as LTR (left-to-right) - no special RTL behavior for Arabic
@@ -13643,6 +14696,12 @@ if ($page == 'reports') {
             if (window.location.search.includes('page=reports') || !window.location.search.includes('page=')) {
                 updateChartTitles(lang);
                 updateChartLabels(lang);
+            }
+            
+            // Update language selector dropdown
+            const langSelector = document.getElementById('languageSelector');
+            if (langSelector) {
+                langSelector.value = lang;
             }
         }
 
@@ -13952,12 +15011,13 @@ if ($page == 'reports') {
         }
 
         function showPromotionDialog(studentId) {
-            // First, check if student is eligible for promotion
-            showLoading('Checking Eligibility', 'Validating student records...');
-            
-            const checkFormData = new FormData();
-            checkFormData.append('action', 'check_promotion_eligibility');
-            checkFormData.append('student_id', studentId);
+            try {
+                // First, check if student is eligible for promotion
+                showLoading(getTranslation('checking_eligibility'), getTranslation('validating_records'));
+                
+                const checkFormData = new FormData();
+                checkFormData.append('action', 'check_promotion_eligibility');
+                checkFormData.append('student_id', studentId);
             
             fetch('', {
                 method: 'POST',
@@ -13994,6 +15054,16 @@ if ($page == 'reports') {
                     return;
                 }
                 
+                // Get all translations first to avoid issues in template literals
+                const creditsText = getTranslation('credits');
+                const promoteToYear2Text = getTranslation('promote_to_year_2');
+                const selectYear2SubjectsText = getTranslation('select_year_2_subjects');
+                const studentEligibleText = getTranslation('student_eligible_promotion');
+                const allRequirementsMetText = getTranslation('all_requirements_met');
+                const availableYear2SubjectsText = getTranslation('available_year_2_subjects');
+                const cancelText = getTranslation('cancel');
+                const promoteStudentText = getTranslation('promote_student');
+                
                 const modal = document.createElement('div');
                 modal.style.cssText = `
                     position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
@@ -14005,7 +15075,7 @@ if ($page == 'reports') {
                     <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; background: #F9FAFB; border-radius: 4px; margin-bottom: 0.5rem;">
                         <input type="checkbox" id="subject_${subject.id}" value="${subject.id}" checked style="margin: 0;">
                         <label for="subject_${subject.id}" style="margin: 0; flex: 1; cursor: pointer;">
-                            <strong>${subject.subject_name}</strong> (${subject.credits} credits)
+                            <strong>${subject.subject_name}</strong> (${subject.credits} ${creditsText})
                         </label>
                     </div>
                 `).join('');
@@ -14014,23 +15084,23 @@ if ($page == 'reports') {
                     <div style="background: white; border-radius: 12px; max-width: 600px; width: 100%; max-height: 90vh; overflow-y: auto; position: relative;">
                         <div style="padding: 1.5rem; border-bottom: 1px solid #E5E7EB; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 12px 12px 0 0;">
                             <h3 style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
-                                <i class="fas fa-arrow-up"></i> Promote to Year 2
+                                <i class="fas fa-arrow-up"></i> ${promoteToYear2Text}
                             </h3>
-                            <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 0.9rem;">Select Year 2 subjects for this student</p>
+                            <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 0.9rem;">${selectYear2SubjectsText}</p>
                             <button onclick="this.closest('.promotion-modal').remove()" 
                                     style="position: absolute; top: 1rem; right: 1rem; background: none; border: none; font-size: 1.5rem; cursor: pointer; color: white; opacity: 0.8;">
-                                ×
+                                <i class="fas fa-times"></i>
                             </button>
                         </div>
                         <div style="padding: 1.5rem;">
                             <div style="background: #F0FDF4; padding: 1rem; border-radius: 6px; border-left: 4px solid #059669; margin-bottom: 1.5rem;">
-                                <h4 style="margin: 0 0 0.5rem 0; color: #059669;"><i class="fas fa-check-circle"></i> Student Eligible for Promotion</h4>
+                                <h4 style="margin: 0 0 0.5rem 0; color: #059669;"><i class="fas fa-check-circle"></i> ${studentEligibleText}</h4>
                                 <p style="margin: 0; font-size: 0.9rem; color: #065F46;">
-                                    All requirements met! Select Year 2 subjects to enroll.
+                                    ${allRequirementsMetText}
                                 </p>
                             </div>
                             
-                            <h4 style="margin: 0 0 1rem 0; color: #374151;">Available Year 2 Subjects:</h4>
+                            <h4 style="margin: 0 0 1rem 0; color: #374151;">${availableYear2SubjectsText}:</h4>
                             <div id="subjectsList" style="max-height: 300px; overflow-y: auto;">
                                 ${subjectsHtml}
                             </div>
@@ -14039,11 +15109,11 @@ if ($page == 'reports') {
                                 <div style="display: flex; gap: 1rem; justify-content: flex-end;">
                                     <button onclick="this.closest('.promotion-modal').remove()" 
                                             style="background: #6B7280; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 6px; cursor: pointer;">
-                                        Cancel
+                                        ${cancelText}
                                     </button>
                                     <button onclick="executePromotion(${studentId})" 
                                             style="background: #10B981; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 6px; cursor: pointer; font-weight: 600;">
-                                        <i class="fas fa-arrow-up"></i> Promote Student
+                                        <i class="fas fa-arrow-up"></i> ${promoteStudentText}
                                     </button>
                                 </div>
                             </div>
@@ -14060,9 +15130,15 @@ if ($page == 'reports') {
                 });
             })
             .catch(error => {
+                hideLoading();
                 console.error('Error:', error);
-                showErrorMessage('Error loading subjects. Please try again.');
+                showErrorMessage(getTranslation('error_loading_subjects'));
             });
+            } catch (error) {
+                hideLoading();
+                console.error('Promotion dialog error:', error);
+                showErrorMessage(getTranslation('error_loading_subjects'));
+            }
         }
 
         function executePromotion(studentId) {
@@ -14076,12 +15152,12 @@ if ($page == 'reports') {
             });
             
             if (selectedSubjects.length === 0) {
-                showErrorMessage('Please select at least one Year 2 subject.');
+                showErrorMessage(getTranslation('select_at_least_one_subject'));
                 return;
             }
             
             // Execute promotion with selected subjects
-            showLoading('Promoting Student', 'Moving to Year 2...');
+            showLoading(getTranslation('promoting_student'), getTranslation('moving_to_year_2'));
             const formData = new FormData();
             formData.append('action', 'promote_student_with_subjects');
             formData.append('student_id', studentId);
@@ -14097,7 +15173,7 @@ if ($page == 'reports') {
                 hideLoading();
                 
                 if (data.success) {
-                    showNotification('Student promoted to Year 2!', 'success');
+                    showNotification(getTranslation('student_promoted_success'), 'success');
                     setTimeout(() => {
                         reloadTableData('students');
                     }, 500);
@@ -14106,7 +15182,7 @@ if ($page == 'reports') {
                     if (data.details) {
                         showEligibilityErrorModal('Promotion', data);
                     } else {
-                        showNotification(data.message || 'Error promoting student', 'error');
+                        showNotification(data.message || getTranslation('error_promoting_student'), 'error');
                     }
                 }
             })
@@ -14411,7 +15487,8 @@ if ($page == 'reports') {
             
             if (filterMarksClass) {
                 // Clear existing options except the default "All Classes"
-                filterMarksClass.innerHTML = '<option value="" data-translate="all_classes">All Classes</option>';
+                const allClassesText = getTranslation('all_classes');
+                filterMarksClass.innerHTML = `<option value="">${allClassesText}</option>`;
                 
                 // Get all classes in new format only (after migration)
                 <?php
@@ -14431,10 +15508,12 @@ if ($page == 'reports') {
                     availableClasses.forEach(className => {
                         const option = document.createElement('option');
                         option.value = className;
-                        // Format display name
+                        // Format display name with translation
                         const year = className.charAt(0);
                         const letter = className.charAt(1);
-                        option.textContent = `Year \${year} - Class \${letter}`;
+                        const yearText = getTranslation('year');
+                        const classText = getTranslation('class');
+                        option.textContent = `\${yearText} \${year} - \${classText} \${letter}`;
                         filterMarksClass.appendChild(option);
                     });
                     ";
@@ -14522,7 +15601,7 @@ if ($page == 'reports') {
                     } else {
                         showSuccessMessage(data.message);
                         setTimeout(() => {
-                            window.location.reload();
+                            fetchAndUpdateSection('teachers');
                         }, 1000);
                     }
                 } else {
@@ -14618,7 +15697,7 @@ if ($page == 'reports') {
         function closeCredentialsPopup() {
             const popups = document.querySelectorAll('[style*="backdrop-filter: blur(4px)"]');
             popups.forEach(popup => popup.remove());
-            window.location.reload();
+            fetchAndUpdateSection('teachers');
         }
         
         function showLoader(message = 'Processing...') {
@@ -14746,12 +15825,12 @@ if ($page == 'reports') {
         }
         
         function toggleTeacherDetails(teacherId) {
-            showLoader('Loading teacher subjects...');
+            showLoading(getTranslation('loading'), getTranslation('please_wait'));
             
             fetch(`?action=get_teacher_subjects&teacher_id=${teacherId}`)
                 .then(response => response.json())
                 .then(data => {
-                    hideLoader();
+                    hideLoading();
                     if (data.success) {
                         showTeacherSubjectsModal(data.teacher, data.assignments);
                     } else {
@@ -14759,16 +15838,69 @@ if ($page == 'reports') {
                     }
                 })
                 .catch(error => {
-                    hideLoader();
+                    hideLoading();
                     console.error('Error:', error);
                     showErrorMessage('Failed to load teacher subjects');
                 });
         }
         
         function showTeacherSubjectsModal(teacher, assignments) {
-            const escape = str => String(str).replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[m]));
-            
-            const assignmentsHTML = assignments && assignments.length > 0 ? assignments.map(a => `
+            try {
+                const escape = str => String(str).replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[m]));
+                
+                // Get all translations first
+                const studentsText = getTranslation('students');
+                const totalText = getTranslation('total');
+                const yearText = getTranslation('year');
+                const assignedText = getTranslation('assigned');
+                const removeText = getTranslation('remove');
+                const noSubjectAssignmentsText = getTranslation('no_subject_assignments');
+                const assignedSubjectsText = getTranslation('assigned_subjects');
+                const assignNewSubjectText = getTranslation('assign_new_subject');
+                
+                const assignmentsHTML = assignments && assignments.length > 0 ? assignments.map(a => {
+                // Parse class breakdown if available
+                let classBreakdownHTML = '';
+                let totalStudents = 0;
+                
+                if (a.class_breakdown && a.class_breakdown !== 'null') {
+                    try {
+                        const breakdown = JSON.parse(a.class_breakdown);
+                        if (Array.isArray(breakdown) && breakdown.length > 0) {
+                            // Sort by class name
+                            breakdown.sort((x, y) => x.class.localeCompare(y.class));
+                            
+                            // Create badges for each class
+                            classBreakdownHTML = breakdown.map(item => {
+                                totalStudents += parseInt(item.count) || 0;
+                                return `<span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #2563eb; color: white;">
+                                    <i class="fas fa-door-open"></i> Class ${escape(item.class)}: ${item.count} ${studentsText}
+                                </span>`;
+                            }).join('');
+                            
+                            // Add total badge if multiple classes
+                            if (breakdown.length > 1) {
+                                classBreakdownHTML += `<span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #3b82f6; color: white;">
+                                    <i class="fas fa-users"></i> ${totalText}: ${totalStudents} ${studentsText}
+                                </span>`;
+                            }
+                        } else {
+                            classBreakdownHTML = `<span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #94a3b8; color: white;">
+                                <i class="fas fa-users"></i> 0 ${studentsText}
+                            </span>`;
+                        }
+                    } catch (e) {
+                        classBreakdownHTML = `<span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #3b82f6; color: white;">
+                            <i class="fas fa-users"></i> ${a.student_count || 0} ${studentsText}
+                        </span>`;
+                    }
+                } else {
+                    classBreakdownHTML = `<span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #94a3b8; color: white;">
+                        <i class="fas fa-users"></i> 0 ${studentsText}
+                    </span>`;
+                }
+                
+                return `
                 <div onclick="event.stopPropagation()" style="padding: 1rem; margin-bottom: 0.75rem; background: #f8fafc; border-left: 4px solid #1e3a8a; border-radius: 6px; display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; cursor: default; transition: all 0.2s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#f8fafc'">
                     <div style="flex: 1;">
                         <div style="font-weight: 700; color: #1e3a8a; font-size: 1.1rem; margin-bottom: 0.5rem;">
@@ -14776,27 +15908,23 @@ if ($page == 'reports') {
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
                             <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #1e3a8a; color: white;">
-                                <i class="fas fa-calendar-alt"></i> Year ${a.year}
+                                <i class="fas fa-calendar-alt"></i> ${yearText} ${a.year}
                             </span>
-                            <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #2563eb; color: white;">
-                                <i class="fas fa-door-open"></i> Class ${escape(a.class_level)}
-                            </span>
-                            <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; background: #3b82f6; color: white;">
-                                <i class="fas fa-users"></i> ${a.student_count} Students
-                            </span>
+                            ${classBreakdownHTML}
                             <span style="padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; background: #e5e7eb; color: #64748b;">
-                                <i class="fas fa-clock"></i> Assigned ${a.assigned_date}
+                                <i class="fas fa-clock"></i> ${assignedText} ${a.assigned_date}
                             </span>
                         </div>
                     </div>
                     <button class="action-btn delete" onclick="removeTeacherAssignmentFromModal(${a.id}, ${teacher.id})" title="Remove Assignment" style="padding: 8px 14px; font-size: 0.85rem;">
-                        <i class="fas fa-trash-alt" style="margin-right: 0.4rem;"></i>Remove
+                        <i class="fas fa-trash-alt" style="margin-right: 0.4rem;"></i>${removeText}
                     </button>
                 </div>
-            `).join('') : `
+                `;
+            }).join('') : `
                 <div style="text-align: center; padding: 3rem;">
                     <i class="fas fa-book-open" style="font-size: 4rem; color: #cbd5e1; margin-bottom: 1rem;"></i>
-                    <p style="color: #94a3b8; font-size: 1rem; margin: 0;">No subject assignments yet</p>
+                    <p style="color: #94a3b8; font-size: 1rem; margin: 0;">${noSubjectAssignmentsText}</p>
                 </div>
             `;
             
@@ -14807,7 +15935,7 @@ if ($page == 'reports') {
                         <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); padding: 1.5rem 2rem; color: white; display: flex; align-items: center; justify-content: space-between;">
                             <h3 style="margin: 0; font-size: 1.3rem; display: flex; align-items: center; gap: 0.75rem;">
                                 <i class="fas fa-chalkboard-teacher"></i>
-                                <span>Assigned Subjects - ${escape(teacher.name)}</span>
+                                <span>${assignedSubjectsText} - ${escape(teacher.name)}</span>
                             </h3>
                             <button onclick="closeTeacherSubjectsModal()" style="background: rgba(255,255,255,0.2); border: none; color: white; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
                                 <i class="fas fa-times"></i>
@@ -14819,7 +15947,7 @@ if ($page == 'reports') {
                         <div style="padding: 1.5rem 2rem; border-top: 2px solid #e5e7eb; background: #f9fafb; display: flex; justify-content: center; gap: 1rem;">
                             <button class="apply-filters-btn" onclick="openAssignSubjectsModalFromTeacher(${teacher.id}, '${escape(teacher.name)}')" style="padding: 0.75rem 2rem; font-size: 0.95rem;">
                                 <i class="fas fa-plus-circle" style="margin-right: 0.5rem;"></i>
-                                <span data-translate="assign_subjects">Assign New Subject</span>
+                                ${assignNewSubjectText}
                             </button>
                         </div>
                     </div>
@@ -14827,6 +15955,13 @@ if ($page == 'reports') {
             `;
             
             document.body.insertAdjacentHTML('beforeend', modalHTML);
+            // Apply current language to the newly added modal
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            applyTranslations(currentLang);
+            } catch (error) {
+                console.error('Teacher subjects modal error:', error);
+                showErrorMessage('Failed to load teacher subjects');
+            }
         }
         
         function closeTeacherSubjectsModal() {
@@ -14873,13 +16008,13 @@ if ($page == 'reports') {
         }
         
         function editTeacher(teacherId) {
-            showLoader('Loading teacher data...');
+            showLoading(getTranslation('loading'), getTranslation('please_wait'));
             
             // Fetch teacher data
             fetch('?action=get_teacher&id=' + teacherId)
                 .then(response => response.json())
                 .then(data => {
-                    hideLoader();
+                    hideLoading();
                     if (data.success) {
                         showEditTeacherModal(data.teacher);
                     } else {
@@ -14887,7 +16022,7 @@ if ($page == 'reports') {
                     }
                 })
                 .catch(error => {
-                    hideLoader();
+                    hideLoading();
                     console.error('Error:', error);
                     showErrorMessage('Failed to load teacher data');
                 });
@@ -14921,7 +16056,7 @@ if ($page == 'reports') {
                                  display: flex; align-items: center; justify-content: center; font-size: 1.25rem; 
                                  transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" 
                                  onmouseout="this.style.background='rgba(255,255,255,0.2)'">
-                                ×
+                                <i class="fas fa-times"></i>
                             </button>
                         </div>
                         
@@ -14953,20 +16088,20 @@ if ($page == 'reports') {
                                         <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="specialization">Specialization</label>
                                         <select name="specialization" class="premium-select" required 
                                                 style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
-                                            <option value="Mathematics" ${teacher.specialization === 'Mathematics' ? 'selected' : ''}>Mathematics</option>
-                                            <option value="Physics" ${teacher.specialization === 'Physics' ? 'selected' : ''}>Physics</option>
-                                            <option value="Chemistry" ${teacher.specialization === 'Chemistry' ? 'selected' : ''}>Chemistry</option>
-                                            <option value="Biology" ${teacher.specialization === 'Biology' ? 'selected' : ''}>Biology</option>
-                                            <option value="English" ${teacher.specialization === 'English' ? 'selected' : ''}>English</option>
-                                            <option value="Arabic" ${teacher.specialization === 'Arabic' ? 'selected' : ''}>Arabic</option>
-                                            <option value="Kurdish" ${teacher.specialization === 'Kurdish' ? 'selected' : ''}>Kurdish</option>
-                                            <option value="Computer Science" ${teacher.specialization === 'Computer Science' ? 'selected' : ''}>Computer Science</option>
-                                            <option value="History" ${teacher.specialization === 'History' ? 'selected' : ''}>History</option>
-                                            <option value="Geography" ${teacher.specialization === 'Geography' ? 'selected' : ''}>Geography</option>
-                                            <option value="Islamic Studies" ${teacher.specialization === 'Islamic Studies' ? 'selected' : ''}>Islamic Studies</option>
-                                            <option value="Physical Education" ${teacher.specialization === 'Physical Education' ? 'selected' : ''}>Physical Education</option>
-                                            <option value="Arts" ${teacher.specialization === 'Arts' ? 'selected' : ''}>Arts</option>
-                                            <option value="Management" ${teacher.specialization === 'Management' ? 'selected' : ''}>Management</option>
+                                            <option value="Mathematics" ${teacher.specialization === 'Mathematics' ? 'selected' : ''} data-translate="spec_mathematics">Mathematics</option>
+                                            <option value="Physics" ${teacher.specialization === 'Physics' ? 'selected' : ''} data-translate="spec_physics">Physics</option>
+                                            <option value="Chemistry" ${teacher.specialization === 'Chemistry' ? 'selected' : ''} data-translate="spec_chemistry">Chemistry</option>
+                                            <option value="Biology" ${teacher.specialization === 'Biology' ? 'selected' : ''} data-translate="spec_biology">Biology</option>
+                                            <option value="English" ${teacher.specialization === 'English' ? 'selected' : ''} data-translate="spec_english">English</option>
+                                            <option value="Arabic" ${teacher.specialization === 'Arabic' ? 'selected' : ''} data-translate="spec_arabic">Arabic</option>
+                                            <option value="Kurdish" ${teacher.specialization === 'Kurdish' ? 'selected' : ''} data-translate="spec_kurdish">Kurdish</option>
+                                            <option value="Computer Science" ${teacher.specialization === 'Computer Science' ? 'selected' : ''} data-translate="spec_computer_science">Computer Science</option>
+                                            <option value="History" ${teacher.specialization === 'History' ? 'selected' : ''} data-translate="spec_history">History</option>
+                                            <option value="Geography" ${teacher.specialization === 'Geography' ? 'selected' : ''} data-translate="spec_geography">Geography</option>
+                                            <option value="Islamic Studies" ${teacher.specialization === 'Islamic Studies' ? 'selected' : ''} data-translate="spec_islamic_studies">Islamic Studies</option>
+                                            <option value="Physical Education" ${teacher.specialization === 'Physical Education' ? 'selected' : ''} data-translate="spec_physical_education">Physical Education</option>
+                                            <option value="Arts" ${teacher.specialization === 'Arts' ? 'selected' : ''} data-translate="spec_arts">Arts</option>
+                                            <option value="Management" ${teacher.specialization === 'Management' ? 'selected' : ''} data-translate="spec_management">Management</option>
                                         </select>
                                     </div>
                                     
@@ -14974,12 +16109,12 @@ if ($page == 'reports') {
                                         <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #1e3a8a;" data-translate="degree">Degree</label>
                                         <select name="degree" class="premium-select" required 
                                                 style="width: 100%; padding: 0.65rem; border: 1.5px solid #cbd5e1; border-radius: 6px; font-size: 0.95rem;">
-                                            <option value="High School Diploma" ${teacher.degree === 'High School Diploma' ? 'selected' : ''}>High School Diploma</option>
-                                            <option value="Associate Degree" ${teacher.degree === 'Associate Degree' ? 'selected' : ''}>Associate Degree</option>
-                                            <option value="Bachelor's Degree" ${teacher.degree === "Bachelor's Degree" ? 'selected' : ''}>Bachelor's Degree</option>
-                                            <option value="Master's Degree" ${teacher.degree === "Master's Degree" ? 'selected' : ''}>Master's Degree</option>
-                                            <option value="Doctorate (PhD)" ${teacher.degree === 'Doctorate (PhD)' ? 'selected' : ''}>Doctorate (PhD)</option>
-                                            <option value="Professional Certificate" ${teacher.degree === 'Professional Certificate' ? 'selected' : ''}>Professional Certificate</option>
+                                            <option value="High School Diploma" ${teacher.degree === 'High School Diploma' ? 'selected' : ''} data-translate="degree_high_school">High School Diploma</option>
+                                            <option value="Associate Degree" ${teacher.degree === 'Associate Degree' ? 'selected' : ''} data-translate="degree_associate">Associate Degree</option>
+                                            <option value="Bachelor's Degree" ${teacher.degree === "Bachelor's Degree" ? 'selected' : ''} data-translate="degree_bachelor">Bachelor's Degree</option>
+                                            <option value="Master's Degree" ${teacher.degree === "Master's Degree" ? 'selected' : ''} data-translate="degree_master">Master's Degree</option>
+                                            <option value="Doctorate (PhD)" ${teacher.degree === 'Doctorate (PhD)' ? 'selected' : ''} data-translate="degree_doctorate">Doctorate (PhD)</option>
+                                            <option value="Professional Certificate" ${teacher.degree === 'Professional Certificate' ? 'selected' : ''} data-translate="degree_certificate">Professional Certificate</option>
                                         </select>
                                     </div>
                                     
@@ -15031,6 +16166,10 @@ if ($page == 'reports') {
             `;
             
             document.body.insertAdjacentHTML('beforeend', modalHTML);
+            
+            // Apply translations to the newly added modal
+            const currentLang = localStorage.getItem('selectedLanguage') || 'en';
+            changeLanguage(currentLang);
         }
         
         function closeEditTeacherModal() {
@@ -15058,7 +16197,7 @@ if ($page == 'reports') {
                 if (data.success) {
                     showSuccessMessage(data.message);
                     setTimeout(() => {
-                        window.location.reload();
+                        fetchAndUpdateSection('teachers');
                     }, 1000);
                 } else {
                     showErrorMessage(data.message);
@@ -15098,7 +16237,7 @@ if ($page == 'reports') {
                     if (data.success) {
                         showSuccessMessage(data.message);
                         setTimeout(() => {
-                            window.location.reload();
+                            fetchAndUpdateSection('teachers');
                         }, 1000);
                     } else {
                         showErrorMessage(data.message);
@@ -15148,7 +16287,7 @@ if ($page == 'reports') {
                 usernameField.required = true;
             }
             
-            document.getElementById('credentialModal').style.display = 'block';
+            document.getElementById('credentialModal').style.display = 'flex';
         }
         
         function closeCredentialModal() {
@@ -15162,7 +16301,7 @@ if ($page == 'reports') {
             const formData = new FormData(event.target);
             formData.append('action', 'generate_teacher_credentials');
             
-            showLoader('Saving credentials...');
+            showLoading(getTranslation('saving'), getTranslation('please_wait'));
             
             fetch('', {
                 method: 'POST',
@@ -15170,19 +16309,19 @@ if ($page == 'reports') {
             })
             .then(response => response.json())
             .then(data => {
-                hideLoader();
+                hideLoading();
                 if (data.success) {
                     showSuccessMessage(data.message);
                     closeCredentialModal();
                     setTimeout(() => {
-                        window.location.reload();
+                        fetchAndUpdateSection('teachers');
                     }, 1000);
                 } else {
                     showErrorMessage(data.message);
                 }
             })
             .catch(error => {
-                hideLoader();
+                hideLoading();
                 console.error('Error:', error);
                 showErrorMessage('Failed to save credentials');
             });
@@ -15252,7 +16391,7 @@ if ($page == 'reports') {
                     if (data.success) {
                         showSuccessMessage(data.message);
                         setTimeout(() => {
-                            window.location.reload();
+                            fetchAndUpdateSection('teachers');
                         }, 1000);
                     } else {
                         showErrorMessage(data.message);
@@ -15410,13 +16549,13 @@ if ($page == 'reports') {
         }
         
         function openAssignSubjectsModal(teacherId, teacherName) {
-            showLoader('Loading subjects...');
+            showLoading(getTranslation('loading'), getTranslation('please_wait'));
             
             // Fetch available subjects from database
             fetch('?action=get_available_subjects&teacher_id=' + teacherId)
                 .then(response => response.json())
                 .then(data => {
-                    hideLoader();
+                    hideLoading();
                     if (data.success) {
                         showAssignSubjectsModal(teacherId, teacherName, data.subjects);
                     } else {
@@ -15424,7 +16563,7 @@ if ($page == 'reports') {
                     }
                 })
                 .catch(error => {
-                    hideLoader();
+                    hideLoading();
                     console.error('Error:', error);
                     showErrorMessage('Failed to load subjects');
                 });
@@ -15533,7 +16672,7 @@ if ($page == 'reports') {
                         }, 500);
                     } else {
                         setTimeout(() => {
-                            window.location.reload();
+                            fetchAndUpdateSection('teachers');
                         }, 1000);
                     }
                 } else {
