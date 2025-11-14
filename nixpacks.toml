@@ -1,0 +1,8 @@
+[phases.setup]
+aptPkgs = ["postgresql-client", "libpq-dev"]
+
+[phases.install]
+cmds = ["echo 'Installing PostgreSQL PHP extensions'"]
+
+[start]
+cmd = "frankenphp run --config /assets/Caddyfile"

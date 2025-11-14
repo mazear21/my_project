@@ -1,0 +1,16 @@
+{
+  "name": "my_project",
+  "description": "Student Management System",
+  "version": "1.0.0",
+  "type": "php",
+  "engines": {
+    "php": "8.4.x"
+  },
+  "require": {
+    "php": ">=8.0",
+    "ext-pgsql": "*",
+    "ext-pdo_pgsql": "*",
+    "ext-mbstring": "*",
+    "ext-json": "*"
+  }
+}
