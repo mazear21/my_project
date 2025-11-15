@@ -3028,11 +3028,18 @@ if ($page == 'reports') {
             max-width: 100%;
             margin: 0 auto;
             display: grid;
-            grid-template-columns: auto 1fr auto;
+            grid-template-columns: auto 1fr auto auto;
             align-items: center;
-            padding: 0 clamp(1rem, 3vw, 2rem);
+            padding: 0 1.5rem;
             min-height: 70px;
-            gap: clamp(1rem, 2vw, 2rem);
+            gap: 1.5rem;
+        }
+        
+        @media (min-width: 1600px) {
+            .nav-container {
+                padding: 0 2rem;
+                gap: 2rem;
+            }
         }
         
         @media (min-width: 1440px) {
@@ -3041,6 +3048,14 @@ if ($page == 'reports') {
             }
         }
 
+        .nav-brand {
+            grid-column: 1;
+        }
+        
+        .hamburger {
+            grid-column: 4;
+        }
+        
         .nav-links {
             display: flex;
             gap: 4px;
@@ -3052,6 +3067,7 @@ if ($page == 'reports') {
             justify-self: center;
             flex-wrap: wrap;
             justify-content: center;
+            grid-column: 2;
         }
         
         .user-info-section {
@@ -3059,6 +3075,7 @@ if ($page == 'reports') {
             display: flex;
             align-items: center;
             gap: 15px;
+            grid-column: 3;
         }
 
         .nav-container a {
@@ -3249,29 +3266,36 @@ if ($page == 'reports') {
         /* Responsive navbar adjustments */
         @media (max-width: 900px) {
             .hamburger {
-                display: flex;
+                display: flex !important;
             }
             
             .nav-container {
                 grid-template-columns: auto 1fr auto;
+                grid-template-rows: auto auto;
                 padding: 12px 15px;
                 gap: 10px;
             }
             
             .nav-brand {
-                order: 1;
-                justify-self: start;
+                grid-column: 1;
+                grid-row: 1;
+            }
+            
+            .user-info-section {
+                grid-column: 2;
+                grid-row: 1;
+                justify-self: center;
             }
             
             .hamburger {
-                order: 2;
-                justify-self: end;
                 grid-column: 3;
+                grid-row: 1;
+                justify-self: end;
             }
             
             .nav-links {
-                order: 4;
                 grid-column: 1 / -1;
+                grid-row: 2;
                 flex-direction: column;
                 width: 100%;
                 max-height: 0;
@@ -3308,15 +3332,12 @@ if ($page == 'reports') {
                 background: rgba(255, 255, 255, 0.1);
             }
             
-            .user-info-section {
-                order: 3;
-                gap: 6px;
-                grid-column: 2;
-                justify-self: center;
-            }
-            
             .user-info-section .current-user {
                 display: none !important;
+            }
+            
+            .user-info-section {
+                gap: 6px;
             }
             
             .user-info-section a {
@@ -17285,11 +17306,23 @@ if ($page == 'reports') {
             const navLinks = document.querySelectorAll('.nav-links a');
             navLinks.forEach(link => {
                 link.addEventListener('click', function() {
-                    if (window.innerWidth <= 768) {
+                    if (window.innerWidth <= 900) {
                         document.getElementById('navLinks').classList.remove('active');
                         document.querySelector('.hamburger').classList.remove('active');
                     }
                 });
+            });
+            
+            // Close menu when clicking outside
+            document.addEventListener('click', function(event) {
+                const navLinksEl = document.getElementById('navLinks');
+                const hamburgerEl = document.querySelector('.hamburger');
+                const isClickInside = navLinksEl.contains(event.target) || hamburgerEl.contains(event.target);
+                
+                if (!isClickInside && navLinksEl.classList.contains('active')) {
+                    navLinksEl.classList.remove('active');
+                    hamburgerEl.classList.remove('active');
+                }
             });
         });
 
