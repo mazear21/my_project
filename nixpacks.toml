@@ -5,4 +5,4 @@ aptPkgs = ["postgresql-client", "libpq-dev"]
 cmds = ["echo 'Installing PostgreSQL PHP extensions'"]
 
 [start]
-cmd = "frankenphp run --config /assets/Caddyfile"
+cmd = "frankenphp run --config /app/Caddyfile"

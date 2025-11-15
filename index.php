@@ -1,8 +1,12 @@
 ﻿<?php
+// Version 3.1 - Responsive Design Fix
+define('APP_VERSION', '3.1.' . date('YmdHis'));
+
 // Prevent caching to ensure fresh data
-header("Cache-Control: no-cache, no-store, must-revalidate");
+header("Cache-Control: no-cache, no-store, must-revalidate, max-age=0");
 header("Pragma: no-cache");
-header("Expires: 0");
+header("Expires: -1");
+header("X-Content-Type-Options: nosniff");
 
 // Authentication Check
 include 'auth_check.php';
@@ -2926,7 +2930,7 @@ if ($page == 'reports') {
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <!-- Force CSS Refresh v2.0 -->
+    <!-- Force CSS Refresh v3.1 - <?= time() ?> -->
     
     <!-- Primary Meta Tags -->
     <title>Premium Student Management System | Academic Portal</title>

@@ -1,0 +1,40 @@
+{
+    # Global options
+    admin off
+    persist_config off
+    auto_https off
+    # Disable caching
+    servers {
+        protocols h1 h2
+    }
+}
+
+:80 {
+    # Root directory
+    root * /app
+
+    # Enable PHP processing with FrankenPHP
+    php_server
+
+    # Disable caching completely
+    header {
+        -Server
+        Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+        Pragma "no-cache"
+        Expires "0"
+        X-Content-Type-Options "nosniff"
+    }
+
+    # Enable file server for static assets
+    file_server
+
+    # Try files first, then route to index.php
+    try_files {path} /index.php?{query}
+
+    # Logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+}
