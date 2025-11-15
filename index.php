@@ -3058,9 +3058,9 @@ if ($page == 'reports') {
         
         .nav-links {
             display: flex;
-            gap: 4px;
+            gap: 6px;
             background: rgba(255, 255, 255, 0.1);
-            padding: 6px;
+            padding: 8px;
             border-radius: 12px;
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.2);
@@ -3068,6 +3068,7 @@ if ($page == 'reports') {
             flex-wrap: wrap;
             justify-content: center;
             grid-column: 2;
+            max-width: 100%;
         }
         
         .user-info-section {
@@ -3082,20 +3083,20 @@ if ($page == 'reports') {
             text-decoration: none;
             color: white;
             font-weight: 600;
-            padding: 8px 12px;
+            padding: 10px 14px;
             border-radius: 10px;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             position: relative;
-            font-size: 0.8rem;
+            font-size: 0.85rem;
             letter-spacing: 0.2px;
             border: 2px solid transparent;
             white-space: nowrap;
         }
         
-        @media (min-width: 1400px) {
+        @media (min-width: 1600px) {
             .nav-container a {
-                padding: 10px 16px;
-                font-size: 0.875rem;
+                padding: 12px 18px;
+                font-size: 0.95rem;
             }
         }
 
@@ -3229,26 +3230,32 @@ if ($page == 'reports') {
         .hamburger {
             display: none;
             flex-direction: column;
-            gap: 5px;
+            gap: 6px;
             cursor: pointer;
-            padding: 10px;
-            background: rgba(255, 255, 255, 0.15);
-            border-radius: 8px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            border: 2px solid rgba(255, 255, 255, 0.4);
             transition: all 0.3s ease;
             z-index: 1001;
+            width: 45px;
+            height: 45px;
+            align-items: center;
+            justify-content: center;
         }
         
         .hamburger:hover {
-            background: rgba(255, 255, 255, 0.25);
+            background: rgba(255, 255, 255, 0.35);
+            transform: scale(1.05);
         }
         
         .hamburger span {
-            width: 25px;
-            height: 3px;
+            width: 28px;
+            height: 3.5px;
             background: white;
-            border-radius: 2px;
+            border-radius: 3px;
             transition: all 0.3s ease;
+            display: block;
         }
         
         .hamburger.active span:nth-child(1) {
@@ -3265,20 +3272,23 @@ if ($page == 'reports') {
 
         /* Responsive navbar adjustments */
         @media (max-width: 900px) {
-            .hamburger {
-                display: flex !important;
-            }
-            
             .nav-container {
                 grid-template-columns: auto 1fr auto;
                 grid-template-rows: auto auto;
-                padding: 12px 15px;
-                gap: 10px;
+                padding: 15px;
+                gap: 12px;
             }
             
             .nav-brand {
                 grid-column: 1;
                 grid-row: 1;
+            }
+            
+            .hamburger {
+                display: flex !important;
+                grid-column: 3;
+                grid-row: 1;
+                justify-self: end;
             }
             
             .user-info-section {
@@ -3287,13 +3297,8 @@ if ($page == 'reports') {
                 justify-self: center;
             }
             
-            .hamburger {
-                grid-column: 3;
-                grid-row: 1;
-                justify-self: end;
-            }
-            
             .nav-links {
+                display: flex;
                 grid-column: 1 / -1;
                 grid-row: 2;
                 flex-direction: column;
@@ -3309,6 +3314,7 @@ if ($page == 'reports') {
                 transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
                 margin-top: 0;
                 box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+                pointer-events: none;
             }
             
             .nav-links.active {
@@ -3317,6 +3323,7 @@ if ($page == 'reports') {
                 padding: 15px;
                 margin-top: 10px;
                 border: 2px solid rgba(255, 255, 255, 0.2);
+                pointer-events: auto;
             }
             
             .nav-links a {
@@ -3381,19 +3388,20 @@ if ($page == 'reports') {
             max-width: 100%;
             width: 100%;
             margin: 0 auto;
-            padding: 1.5rem;
+            padding: 1.75rem;
         }
         
         @media (min-width: 1400px) {
             .container {
-                max-width: 1350px;
+                max-width: 1320px;
                 padding: 2rem;
             }
         }
         
-        @media (min-width: 1800px) {
+        @media (min-width: 1920px) {
             .container {
                 max-width: 1600px;
+                padding: 2.5rem;
             }
         }
 
@@ -3411,41 +3419,59 @@ if ($page == 'reports') {
         }
 
         .dashboard-header {
-            padding: 2.5rem 2rem 2rem;
+            padding: 3rem 2.5rem 2.5rem;
             margin: 0;
             border-bottom: none;
             background: var(--primary-color);
             text-align: center;
         }
         
-        @media (max-width: 768px) {
+        @media (max-width: 900px) {
+            .dashboard-header {
+                padding: 2rem 1.5rem 1.5rem;
+            }
+        }
+        
+        @media (max-width: 600px) {
             .dashboard-header {
                 padding: 1.5rem 1rem 1rem;
             }
         }
 
         .dashboard-header h1 {
-            font-size: 1.75rem;
+            font-size: 2.25rem;
             font-weight: 600;
             color: #ffffff;
             margin-bottom: 0.5rem;
             letter-spacing: -0.5px;
         }
         
-        @media (max-width: 768px) {
+        @media (max-width: 900px) {
+            .dashboard-header h1 {
+                font-size: 1.75rem;
+            }
+        }
+        
+        @media (max-width: 600px) {
             .dashboard-header h1 {
                 font-size: 1.35rem;
             }
         }
 
         .dashboard-subtitle {
-            font-size: 0.9rem;
+            font-size: 1.05rem;
             color: rgba(255, 255, 255, 0.9);
             font-weight: 400;
             text-rendering: optimizeLegibility;
         }
         
-        @media (max-width: 768px) {
+        @media (max-width: 900px) {
+            .dashboard-subtitle {
+                font-size: 0.95rem;
+            }
+        }
+        
+        @media (max-width: 600px) {
             .dashboard-subtitle {
                 font-size: 0.8rem;
             }
@@ -3459,7 +3485,7 @@ if ($page == 'reports') {
 
         /* ===== REPORTS MAIN CONTENT ===== */
         .reports-main-content {
-            padding: 1.75rem;
+            padding: 2.25rem;
             width: 100%;
             max-width: 100%;
             overflow-y: auto;
@@ -3467,7 +3493,13 @@ if ($page == 'reports') {
             min-height: calc(100vh - 70px);
         }
         
-        @media (max-width: 768px) {
+        @media (max-width: 900px) {
+            .reports-main-content {
+                padding: 1.5rem;
+            }
+        }
+        
+        @media (max-width: 600px) {
             .reports-main-content {
                 padding: 1rem;
             }
@@ -3577,7 +3609,7 @@ if ($page == 'reports') {
         .kpi-card {
             position: relative;
             border-radius: 14px;
-            padding: 1.25rem;
+            padding: 1.75rem 1.5rem;
             z-index: 1;
             overflow: hidden;
             display: flex;
@@ -3585,7 +3617,14 @@ if ($page == 'reports') {
             justify-content: center;
             box-shadow: 20px 20px 60px #bebebe, -20px -20px 60px #ffffff;
             transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            min-height: 130px;
+            min-height: 150px;
+        }
+        
+        @media (max-width: 900px) {
+            .kpi-card {
+                padding: 1.25rem;
+                min-height: 130px;
+            }
         }
         
         @media (max-width: 600px) {
@@ -3772,12 +3811,19 @@ if ($page == 'reports') {
         }
 
         .kpi-value {
-            font-size: 2rem;
+            font-size: 2.5rem;
             font-weight: 700;
             color: #1e293b;
-            line-height: 1.1;
-            margin-bottom: 0.4rem;
+            line-height: 1;
+            margin-bottom: 0.5rem;
             text-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            white-space: nowrap;
+        }
+        
+        @media (max-width: 900px) {
+            .kpi-value {
+                font-size: 2rem;
+            }
         }
         
         @media (max-width: 600px) {
@@ -3787,12 +3833,19 @@ if ($page == 'reports') {
         }
 
         .kpi-label {
-            font-size: 0.85rem;
+            font-size: 0.95rem;
             color: #64748b;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
             text-align: center;
+            line-height: 1.3;
+        }
+        
+        @media (max-width: 900px) {
+            .kpi-label {
+                font-size: 0.85rem;
+            }
         }
         
         @media (max-width: 600px) {
