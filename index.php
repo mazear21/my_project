@@ -3042,14 +3042,15 @@ if ($page == 'reports') {
 
         .nav-links {
             display: flex;
-            gap: 0;
+            gap: 4px;
             background: rgba(255, 255, 255, 0.1);
-            padding: 8px;
-            border-radius: 15px;
+            padding: 6px;
+            border-radius: 12px;
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.2);
             justify-self: center;
-            flex-wrap: nowrap;
+            flex-wrap: wrap;
+            justify-content: center;
         }
         
         .user-info-section {
@@ -3063,14 +3064,21 @@ if ($page == 'reports') {
             text-decoration: none;
             color: white;
             font-weight: 600;
-            padding: clamp(8px, 1vw, 10px) clamp(12px, 1.5vw, 18px);
+            padding: 8px 12px;
             border-radius: 10px;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             position: relative;
-            font-size: clamp(0.75rem, 1vw, 0.875rem);
-            letter-spacing: 0.3px;
+            font-size: 0.8rem;
+            letter-spacing: 0.2px;
             border: 2px solid transparent;
             white-space: nowrap;
+        }
+        
+        @media (min-width: 1400px) {
+            .nav-container a {
+                padding: 10px 16px;
+                font-size: 0.875rem;
+            }
         }
 
         .nav-container a::before {
@@ -3206,11 +3214,15 @@ if ($page == 'reports') {
             gap: 5px;
             cursor: pointer;
             padding: 10px;
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.15);
             border-radius: 8px;
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
             transition: all 0.3s ease;
-            justify-self: end;
+            z-index: 1001;
+        }
+        
+        .hamburger:hover {
+            background: rgba(255, 255, 255, 0.25);
         }
         
         .hamburger span {
@@ -3234,21 +3246,26 @@ if ($page == 'reports') {
         }
 
         /* Responsive navbar adjustments */
-        @media (max-width: 768px) {
+        @media (max-width: 900px) {
             .hamburger {
                 display: flex;
-                order: 3;
             }
             
             .nav-container {
-                grid-template-columns: 1fr auto;
-                padding: 15px;
-                gap: 15px;
+                grid-template-columns: auto 1fr auto;
+                padding: 12px 15px;
+                gap: 10px;
             }
             
             .nav-brand {
                 order: 1;
                 justify-self: start;
+            }
+            
+            .hamburger {
+                order: 2;
+                justify-self: end;
+                grid-column: 3;
             }
             
             .nav-links {
@@ -3260,33 +3277,41 @@ if ($page == 'reports') {
                 overflow: hidden;
                 opacity: 0;
                 background: rgba(30, 58, 138, 0.98);
-                border-radius: 10px;
+                backdrop-filter: blur(20px);
+                border-radius: 12px;
                 padding: 0;
                 gap: 0;
-                transition: all 0.4s ease;
+                transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
                 margin-top: 0;
+                box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
             }
             
             .nav-links.active {
-                max-height: 600px;
+                max-height: 700px;
                 opacity: 1;
-                padding: 15px 10px;
+                padding: 15px;
                 margin-top: 10px;
+                border: 2px solid rgba(255, 255, 255, 0.2);
             }
             
             .nav-links a {
                 width: 100%;
                 text-align: center;
                 padding: 14px 20px !important;
-                margin: 3px 0;
-                font-size: 14px !important;
+                margin: 4px 0;
+                font-size: 0.95rem !important;
+                border-radius: 8px;
+            }
+            
+            .nav-links a:hover {
+                background: rgba(255, 255, 255, 0.1);
             }
             
             .user-info-section {
-                order: 2;
-                gap: 8px;
+                order: 3;
+                gap: 6px;
                 grid-column: 2;
-                justify-self: end;
+                justify-self: center;
             }
             
             .user-info-section .current-user {
@@ -3295,22 +3320,18 @@ if ($page == 'reports') {
             
             .user-info-section a {
                 padding: 8px 12px !important;
-                font-size: 12px !important;
-            }
-            
-            .language-switcher {
-                order: 2;
+                font-size: 0.75rem !important;
             }
             
             .language-switcher select {
                 padding: 6px 10px !important;
-                font-size: 12px !important;
+                font-size: 0.75rem !important;
             }
         }
         
-        @media (max-width: 480px) {
+        @media (max-width: 600px) {
             .nav-container {
-                padding: 12px;
+                padding: 10px 12px;
             }
             
             .nav-brand .brand-text {
@@ -3321,6 +3342,16 @@ if ($page == 'reports') {
                 width: 50px !important;
                 height: 50px !important;
             }
+            
+            .user-info-section a {
+                padding: 6px 10px !important;
+                font-size: 0.7rem !important;
+            }
+            
+            .language-switcher select {
+                padding: 5px 8px !important;
+                font-size: 0.7rem !important;
+            }
         }
 
         /* ===== CONTAINERS ===== */
@@ -3328,16 +3359,17 @@ if ($page == 'reports') {
             max-width: 100%;
             width: 100%;
             margin: 0 auto;
-            padding: clamp(1rem, 2vw, 2rem);
+            padding: 1.5rem;
         }
         
-        @media (min-width: 1200px) {
+        @media (min-width: 1400px) {
             .container {
-                max-width: 1400px;
+                max-width: 1350px;
+                padding: 2rem;
             }
         }
         
-        @media (min-width: 1600px) {
+        @media (min-width: 1800px) {
             .container {
                 max-width: 1600px;
             }
@@ -3357,26 +3389,44 @@ if ($page == 'reports') {
         }
 
         .dashboard-header {
-            padding: clamp(2rem, 4vw, 3rem) clamp(1rem, 3vw, 2rem) clamp(1.5rem, 3vw, 2rem);
+            padding: 2.5rem 2rem 2rem;
             margin: 0;
             border-bottom: none;
             background: var(--primary-color);
             text-align: center;
         }
+        
+        @media (max-width: 768px) {
+            .dashboard-header {
+                padding: 1.5rem 1rem 1rem;
+            }
+        }
 
         .dashboard-header h1 {
-            font-size: clamp(1.5rem, 3vw, 2rem);
+            font-size: 1.75rem;
             font-weight: 600;
             color: #ffffff;
             margin-bottom: 0.5rem;
             letter-spacing: -0.5px;
         }
+        
+        @media (max-width: 768px) {
+            .dashboard-header h1 {
+                font-size: 1.35rem;
+            }
+        }
 
         .dashboard-subtitle {
-            font-size: clamp(0.85rem, 1.5vw, 0.95rem);
+            font-size: 0.9rem;
             color: rgba(255, 255, 255, 0.9);
             font-weight: 400;
             text-rendering: optimizeLegibility;
+        }
+        
+        @media (max-width: 768px) {
+            .dashboard-subtitle {
+                font-size: 0.8rem;
+            }
         }
         
         /* RTL support for Arabic/Kurdish */
@@ -3387,8 +3437,7 @@ if ($page == 'reports') {
 
         /* ===== REPORTS MAIN CONTENT ===== */
         .reports-main-content {
-            padding: clamp(1rem, 2vw, 2rem);
-            padding-top: clamp(1rem, 2vw, 2rem);
+            padding: 1.75rem;
             width: 100%;
             max-width: 100%;
             overflow-y: auto;
@@ -3475,32 +3524,28 @@ if ($page == 'reports') {
         /* ===== KPI CARDS ===== */
         .kpi-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
-            gap: clamp(1rem, 2vw, 1.5rem);
-            margin-bottom: clamp(2rem, 3vw, 3rem);
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.25rem;
+            margin-bottom: 2rem;
             width: 100%;
             scroll-margin-top: 90px;
         }
         
-        @media (min-width: 1200px) {
-            .kpi-grid {
-                grid-template-columns: repeat(4, 1fr);
-            }
-        }
-        
-        @media (min-width: 900px) and (max-width: 1199px) {
+        @media (max-width: 1300px) {
             .kpi-grid {
                 grid-template-columns: repeat(3, 1fr);
+                gap: 1rem;
             }
         }
         
-        @media (min-width: 600px) and (max-width: 899px) {
+        @media (max-width: 900px) {
             .kpi-grid {
                 grid-template-columns: repeat(2, 1fr);
+                gap: 1rem;
             }
         }
         
-        @media (max-width: 599px) {
+        @media (max-width: 600px) {
             .kpi-grid {
                 grid-template-columns: 1fr;
                 gap: 1rem;
@@ -3510,7 +3555,7 @@ if ($page == 'reports') {
         .kpi-card {
             position: relative;
             border-radius: 14px;
-            padding: clamp(1rem, 2vw, 1.5rem);
+            padding: 1.25rem;
             z-index: 1;
             overflow: hidden;
             display: flex;
@@ -3518,7 +3563,14 @@ if ($page == 'reports') {
             justify-content: center;
             box-shadow: 20px 20px 60px #bebebe, -20px -20px 60px #ffffff;
             transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            min-height: 120px;
+            min-height: 130px;
+        }
+        
+        @media (max-width: 600px) {
+            .kpi-card {
+                padding: 1rem;
+                min-height: 110px;
+            }
         }
 
         .kpi-card:hover {
@@ -3698,21 +3750,33 @@ if ($page == 'reports') {
         }
 
         .kpi-value {
-            font-size: clamp(1.75rem, 3vw, 2.2rem);
+            font-size: 2rem;
             font-weight: 700;
             color: #1e293b;
             line-height: 1.1;
             margin-bottom: 0.4rem;
             text-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
+        
+        @media (max-width: 600px) {
+            .kpi-value {
+                font-size: 1.75rem;
+            }
+        }
 
         .kpi-label {
-            font-size: clamp(0.75rem, 1.5vw, 0.95rem);
+            font-size: 0.85rem;
             color: #64748b;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
             text-align: center;
+        }
+        
+        @media (max-width: 600px) {
+            .kpi-label {
+                font-size: 0.75rem;
+            }
         }
 
         .kpi-trend {
@@ -3817,22 +3881,41 @@ if ($page == 'reports') {
         .charts-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 1.5rem;
+            gap: 1.25rem;
             margin-bottom: 2rem;
             width: 100%;
             max-width: 100%;
+        }
+        
+        @media (max-width: 1200px) {
+            .charts-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 1rem;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
         }
 
         .chart-card {
             background: var(--card-bg);
             border-radius: var(--border-radius);
-            padding: clamp(1rem, 2vw, 1.5rem);
+            padding: 1.25rem;
             box-shadow: var(--shadow);
             border: 1px solid var(--border-color);
             transition: var(--transition);
             max-width: 100%;
             min-width: 0;
             overflow-x: auto;
+        }
+        
+        @media (max-width: 768px) {
+            .chart-card {
+                padding: 1rem;
+            }
         }
 
         .chart-card:hover {
@@ -4426,24 +4509,34 @@ if ($page == 'reports') {
         table {
             width: 100%;
             border-collapse: collapse;
-            font-size: clamp(0.8rem, 1.5vw, 0.9rem);
+            font-size: 0.875rem;
             table-layout: fixed;
         }
 
         th, td {
-            padding: clamp(0.5rem, 1vw, 0.875rem) clamp(0.75rem, 1.5vw, 1rem);
+            padding: 0.75rem 0.875rem;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
             vertical-align: middle;
         }
         
-        @media (max-width: 768px) {
+        @media (max-width: 900px) {
+            table {
+                font-size: 0.8rem;
+            }
+            
+            th, td {
+                padding: 0.65rem 0.6rem;
+            }
+        }
+        
+        @media (max-width: 600px) {
             table {
                 font-size: 0.75rem;
             }
             
             th, td {
-                padding: 0.5rem 0.5rem;
+                padding: 0.5rem 0.4rem;
             }
         }
 
