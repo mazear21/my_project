@@ -2930,7 +2930,10 @@ if ($page == 'reports') {
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <!-- Force CSS Refresh v3.1 - <?= time() ?> -->
+    <!-- Force CSS Refresh v4.0 - <?= time() ?> -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="-1">
     
     <!-- Primary Meta Tags -->
     <title>Premium Student Management System | Academic Portal</title>
@@ -3589,13 +3592,6 @@ if ($page == 'reports') {
             scroll-margin-top: 80px;
         }
         
-        @media (max-width: 1100px) {
-            .kpi-grid {
-                grid-template-columns: repeat(2, 1fr);
-                gap: 1rem;
-            }
-        }
-        
         @media (max-width: 900px) {
             .kpi-grid {
                 grid-template-columns: repeat(2, 1fr);
@@ -3966,7 +3962,7 @@ if ($page == 'reports') {
             max-width: 100%;
         }
         
-        @media (max-width: 1100px) {
+        @media (max-width: 900px) {
             .charts-grid {
                 grid-template-columns: repeat(2, 1fr);
                 gap: 1rem;
