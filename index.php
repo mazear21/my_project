@@ -3025,13 +3025,19 @@ if ($page == 'reports') {
 
         .nav-container {
             max-width: 100%;
-            margin: 0;
+            margin: 0 auto;
             display: grid;
             grid-template-columns: auto 1fr auto;
             align-items: center;
-            padding: 0 2rem;
+            padding: 0 clamp(1rem, 3vw, 2rem);
             min-height: 70px;
-            gap: 2rem;
+            gap: clamp(1rem, 2vw, 2rem);
+        }
+        
+        @media (min-width: 1440px) {
+            .nav-container {
+                max-width: 1600px;
+            }
         }
 
         .nav-links {
@@ -3057,11 +3063,11 @@ if ($page == 'reports') {
             text-decoration: none;
             color: white;
             font-weight: 600;
-            padding: 10px 18px;
+            padding: clamp(8px, 1vw, 10px) clamp(12px, 1.5vw, 18px);
             border-radius: 10px;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             position: relative;
-            font-size: 13px;
+            font-size: clamp(0.75rem, 1vw, 0.875rem);
             letter-spacing: 0.3px;
             border: 2px solid transparent;
             white-space: nowrap;
@@ -3193,35 +3199,127 @@ if ($page == 'reports') {
             line-height: 1;
         }
 
+        /* Hamburger Menu Button */
+        .hamburger {
+            display: none;
+            flex-direction: column;
+            gap: 5px;
+            cursor: pointer;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s ease;
+            justify-self: end;
+        }
+        
+        .hamburger span {
+            width: 25px;
+            height: 3px;
+            background: white;
+            border-radius: 2px;
+            transition: all 0.3s ease;
+        }
+        
+        .hamburger.active span:nth-child(1) {
+            transform: rotate(45deg) translate(8px, 8px);
+        }
+        
+        .hamburger.active span:nth-child(2) {
+            opacity: 0;
+        }
+        
+        .hamburger.active span:nth-child(3) {
+            transform: rotate(-45deg) translate(7px, -7px);
+        }
+
         /* Responsive navbar adjustments */
         @media (max-width: 768px) {
+            .hamburger {
+                display: flex;
+                order: 3;
+            }
+            
             .nav-container {
-                flex-wrap: wrap;
-                gap: 15px;
+                grid-template-columns: 1fr auto;
                 padding: 15px;
+                gap: 15px;
             }
             
             .nav-brand {
                 order: 1;
-                flex: 1 1 100%;
-                justify-content: center;
+                justify-self: start;
             }
             
             .nav-links {
+                order: 4;
+                grid-column: 1 / -1;
+                flex-direction: column;
+                width: 100%;
+                max-height: 0;
+                overflow: hidden;
+                opacity: 0;
+                background: rgba(30, 58, 138, 0.98);
+                border-radius: 10px;
+                padding: 0;
+                gap: 0;
+                transition: all 0.4s ease;
+                margin-top: 0;
+            }
+            
+            .nav-links.active {
+                max-height: 600px;
+                opacity: 1;
+                padding: 15px 10px;
+                margin-top: 10px;
+            }
+            
+            .nav-links a {
+                width: 100%;
+                text-align: center;
+                padding: 14px 20px !important;
+                margin: 3px 0;
+                font-size: 14px !important;
+            }
+            
+            .user-info-section {
                 order: 2;
-                flex: 1 1 auto;
-                justify-content: center;
+                gap: 8px;
+                grid-column: 2;
+                justify-self: end;
+            }
+            
+            .user-info-section .current-user {
+                display: none !important;
+            }
+            
+            .user-info-section a {
+                padding: 8px 12px !important;
+                font-size: 12px !important;
             }
             
             .language-switcher {
-                order: 3;
-                flex: 1 1 auto;
-                justify-content: center;
+                order: 2;
             }
             
-            .nav-container a {
-                padding: 10px 16px;
-                font-size: 12px;
+            .language-switcher select {
+                padding: 6px 10px !important;
+                font-size: 12px !important;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .nav-container {
+                padding: 12px;
+            }
+            
+            .nav-brand .brand-text {
+                display: none;
+            }
+            
+            .nav-brand .brand-icon img {
+                width: 50px !important;
+                height: 50px !important;
             }
         }
 
@@ -3230,12 +3328,18 @@ if ($page == 'reports') {
             max-width: 100%;
             width: 100%;
             margin: 0 auto;
-            padding: 2rem;
+            padding: clamp(1rem, 2vw, 2rem);
         }
         
-        @media (min-width: 1440px) {
+        @media (min-width: 1200px) {
             .container {
                 max-width: 1400px;
+            }
+        }
+        
+        @media (min-width: 1600px) {
+            .container {
+                max-width: 1600px;
             }
         }
 
@@ -3253,7 +3357,7 @@ if ($page == 'reports') {
         }
 
         .dashboard-header {
-            padding: 3rem 2rem 2rem;
+            padding: clamp(2rem, 4vw, 3rem) clamp(1rem, 3vw, 2rem) clamp(1.5rem, 3vw, 2rem);
             margin: 0;
             border-bottom: none;
             background: var(--primary-color);
@@ -3261,7 +3365,7 @@ if ($page == 'reports') {
         }
 
         .dashboard-header h1 {
-            font-size: 2rem;
+            font-size: clamp(1.5rem, 3vw, 2rem);
             font-weight: 600;
             color: #ffffff;
             margin-bottom: 0.5rem;
@@ -3269,7 +3373,7 @@ if ($page == 'reports') {
         }
 
         .dashboard-subtitle {
-            font-size: 0.95rem;
+            font-size: clamp(0.85rem, 1.5vw, 0.95rem);
             color: rgba(255, 255, 255, 0.9);
             font-weight: 400;
             text-rendering: optimizeLegibility;
@@ -3283,12 +3387,19 @@ if ($page == 'reports') {
 
         /* ===== REPORTS MAIN CONTENT ===== */
         .reports-main-content {
-            padding: 2rem;
-            padding-top: 2rem;
+            padding: clamp(1rem, 2vw, 2rem);
+            padding-top: clamp(1rem, 2vw, 2rem);
             width: 100%;
             max-width: 100%;
             overflow-y: auto;
+            overflow-x: hidden;
             min-height: calc(100vh - 70px);
+        }
+        
+        @media (max-width: 768px) {
+            .reports-main-content {
+                padding: 1rem;
+            }
         }
 
         /* ===== YEAR FILTER TOGGLE ===== */
@@ -3364,35 +3475,42 @@ if ($page == 'reports') {
         /* ===== KPI CARDS ===== */
         .kpi-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 1.5rem;
-            margin-bottom: 3rem;
+            grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr));
+            gap: clamp(1rem, 2vw, 1.5rem);
+            margin-bottom: clamp(2rem, 3vw, 3rem);
             width: 100%;
             scroll-margin-top: 90px;
         }
         
-        @media (max-width: 1400px) {
+        @media (min-width: 1200px) {
+            .kpi-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+        }
+        
+        @media (min-width: 900px) and (max-width: 1199px) {
             .kpi-grid {
                 grid-template-columns: repeat(3, 1fr);
             }
         }
         
-        @media (max-width: 1024px) {
+        @media (min-width: 600px) and (max-width: 899px) {
             .kpi-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
         }
         
-        @media (max-width: 640px) {
+        @media (max-width: 599px) {
             .kpi-grid {
                 grid-template-columns: 1fr;
+                gap: 1rem;
             }
         }
 
         .kpi-card {
             position: relative;
             border-radius: 14px;
-            padding: 1.5rem;
+            padding: clamp(1rem, 2vw, 1.5rem);
             z-index: 1;
             overflow: hidden;
             display: flex;
@@ -3400,6 +3518,7 @@ if ($page == 'reports') {
             justify-content: center;
             box-shadow: 20px 20px 60px #bebebe, -20px -20px 60px #ffffff;
             transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            min-height: 120px;
         }
 
         .kpi-card:hover {
@@ -3579,20 +3698,21 @@ if ($page == 'reports') {
         }
 
         .kpi-value {
-            font-size: 2.2rem;
+            font-size: clamp(1.75rem, 3vw, 2.2rem);
             font-weight: 700;
             color: #1e293b;
-            line-height: 1;
+            line-height: 1.1;
             margin-bottom: 0.4rem;
             text-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
 
         .kpi-label {
-            font-size: 0.95rem;
+            font-size: clamp(0.75rem, 1.5vw, 0.95rem);
             color: #64748b;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            text-align: center;
         }
 
         .kpi-trend {
@@ -3706,12 +3826,13 @@ if ($page == 'reports') {
         .chart-card {
             background: var(--card-bg);
             border-radius: var(--border-radius);
-            padding: 1.5rem;
+            padding: clamp(1rem, 2vw, 1.5rem);
             box-shadow: var(--shadow);
             border: 1px solid var(--border-color);
             transition: var(--transition);
             max-width: 100%;
             min-width: 0;
+            overflow-x: auto;
         }
 
         .chart-card:hover {
@@ -4305,15 +4426,25 @@ if ($page == 'reports') {
         table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 0.9rem;
+            font-size: clamp(0.8rem, 1.5vw, 0.9rem);
             table-layout: fixed;
         }
 
         th, td {
-            padding: 0.875rem 1rem;
+            padding: clamp(0.5rem, 1vw, 0.875rem) clamp(0.75rem, 1.5vw, 1rem);
             text-align: left;
             border-bottom: 1px solid var(--border-color);
             vertical-align: middle;
+        }
+        
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.75rem;
+            }
+            
+            th, td {
+                padding: 0.5rem 0.5rem;
+            }
         }
 
         th {
@@ -5151,6 +5282,33 @@ if ($page == 'reports') {
             }
         }
         
+        /* Responsive Grid Utilities */
+        .responsive-grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+        
+        @media (max-width: 900px) {
+            .responsive-grid-2 {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+        }
+        
+        .responsive-form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+        
+        @media (max-width: 600px) {
+            .responsive-form-grid {
+                grid-template-columns: 1fr;
+                gap: 10px;
+            }
+        }
+
         /* Small Mobile (up to 479px) */
         @media (max-width: 479px) {
             .container { padding: 0.5rem; }
@@ -5296,7 +5454,12 @@ if ($page == 'reports') {
                     <span class="brand-subtitle" data-translate="system_subtitle">Academic Portal</span>
                 </div>
             </div>
-            <div class="nav-links">
+            <div class="hamburger" onclick="toggleMobileMenu()">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+            <div class="nav-links" id="navLinks">
                 <?php if (isAdmin()): ?>
                     <a href="?page=reports" <?= $page == 'reports' ? 'class="active"' : '' ?> data-translate="nav_reports">Dashboard</a>
                     <a href="?page=students" <?= $page == 'students' ? 'class="active"' : '' ?> data-translate="nav_students">Students</a>
@@ -5464,7 +5627,7 @@ if ($page == 'reports') {
                     </div>
 
                     <!-- Main Content Grid -->
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 30px;">
+                    <div class="responsive-grid-2" style="margin-top: 30px;">
                         <!-- Add New Task Section -->
                         <div class="chart-card">
                             <h3 class="chart-title" style="display: flex; align-items: center; gap: 10px;">
@@ -5502,7 +5665,7 @@ if ($page == 'reports') {
                                     <textarea name="description" rows="3" data-translate-placeholder="task_description_placeholder" placeholder="Additional details..." style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px; resize: vertical;"></textarea>
                                 </div>
                                 
-                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                                <div class="responsive-form-grid" style="margin-bottom: 15px;">
                                     <div>
                                         <label style="display: block; margin-bottom: 5px; font-weight: 600; color: #334155;" data-translate="task_due_date">Due Date</label>
                                         <input type="date" name="due_date" style="width: 100%; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 14px;">
@@ -17014,6 +17177,27 @@ if ($page == 'reports') {
             });
         }
 
+
+        // Mobile Menu Toggle
+        function toggleMobileMenu() {
+            const navLinks = document.getElementById('navLinks');
+            const hamburger = document.querySelector('.hamburger');
+            navLinks.classList.toggle('active');
+            hamburger.classList.toggle('active');
+        }
+
+        // Close mobile menu when clicking a link
+        document.addEventListener('DOMContentLoaded', function() {
+            const navLinks = document.querySelectorAll('.nav-links a');
+            navLinks.forEach(link => {
+                link.addEventListener('click', function() {
+                    if (window.innerWidth <= 768) {
+                        document.getElementById('navLinks').classList.remove('active');
+                        document.querySelector('.hamburger').classList.remove('active');
+                    }
+                });
+            });
+        });
 
     </script>
     
